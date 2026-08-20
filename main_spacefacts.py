@@ -153,7 +153,7 @@ Topic: {topic}
 def generate_script(topic: str) -> dict:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-3.6-flash")
 
     prompt = SCRIPT_SYSTEM_PROMPT.replace("{topic}", topic)
     response = model.generate_content(
