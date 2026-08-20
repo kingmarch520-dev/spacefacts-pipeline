@@ -61,9 +61,12 @@ TTS_VOICES = [
     "en-AU-WilliamNeural",   # relaxed Australian male
 ]
 
-# A rotating pool of space/physics sub-topics so state.json cycles
-# through fresh angles instead of repeating.
+# A rotating pool of sub-topics so state.json cycles through fresh
+# angles instead of repeating. Two lanes: space/physics and sea/ocean —
+# both are "scale and mystery" facts, which is why the black hole video
+# worked, so the ocean side is picked to hit the same nerve.
 TOPIC_POOL = [
+    # space / physics
     "gravitational time dilation near a black hole",
     "what a neutron star's density actually means",
     "why the observable universe has an edge",
@@ -76,6 +79,19 @@ TOPIC_POOL = [
     "why time moves slower for astronauts on the ISS",
     "what dark matter actually does to galaxies",
     "how a supernova could theoretically threaten Earth",
+    # sea / ocean
+    "how little of the ocean floor has actually been mapped",
+    "the crushing pressure at the bottom of the Mariana Trench",
+    "why the deep ocean is in permanent total darkness",
+    "how much of Earth's oxygen actually comes from the ocean",
+    "what lives in hydrothermal vents with no sunlight at all",
+    "how big the largest recorded giant squid actually was",
+    "why most of the ocean is still completely unexplored",
+    "how deep sunlight actually stops reaching underwater",
+    "what happens to a human body at extreme ocean depth",
+    "how old the oldest living sea creature actually is",
+    "why bioluminescence exists in deep sea animals",
+    "how massive a blue whale's heart actually is",
 ]
 
 # ------------------------------------------------------------------
@@ -103,7 +119,7 @@ def get_next_topic():
 # ------------------------------------------------------------------
 
 SCRIPT_SYSTEM_PROMPT = """You are writing a 30-45 second YouTube Shorts script
-about a space or physics fact.
+about a space/physics fact OR a sea/ocean fact.
 
 Rules for how it should sound:
 - Write like you're explaining something wild to a friend, not narrating
@@ -117,11 +133,18 @@ Rules for how it should sound:
   ONE strong word max per sentence, and only when it's earned.
 - Include exactly one moment of genuine surprise or disbelief, phrased
   like a reaction, not a lecture.
-- End on the fact itself. No summary, no moral, no "makes you think"
-  closing line.
+- Deliver the core fact clearly before the final scene. No summary, no
+  moral, no "makes you think" closing line.
+- The FINAL scene must be a short joke or pun directly related to the
+  fact — one line, genuinely funny, not corny "dad joke for the sake
+  of it" filler. It should feel like a natural button on the video, the
+  kind of line that gets a laugh-comment. If a clean pun exists in the
+  topic (e.g. wordplay on the animal, phenomenon, or scientific term),
+  prefer that over a generic joke.
 
 Break the script into scenes. Each scene is one or two sentences of
-narration. For each scene, also provide a visual:
+narration, including the final joke scene. For each scene, also provide
+a visual:
 - visual_type: "literal" if real stock footage of this exists
   (e.g. a dam, the ISS, a starfield, a person walking)
 - visual_type: "abstract" if it's a concept with no real footage
@@ -130,6 +153,10 @@ narration. For each scene, also provide a visual:
 - visual_query: for "literal", a 3-6 word stock footage search term.
   For "abstract", a descriptive AI image generation prompt (can be
   longer, be specific and cinematic).
+- For the final joke scene, pick whichever visual actually supports
+  the punchline (often literal — the animal/phenomenon reacting, or
+  a simple relevant clip works better than an abstract image for comedic
+  timing).
 
 Return ONLY valid JSON, no markdown fences, no commentary, in this
 exact shape:
@@ -182,7 +209,7 @@ async def _synthesize(text: str, voice: str, out_path: Path):
 
 def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
     """Generates one mp3 per scene, returns list of (path, duration)."""
-    from moviepy.editor import AudioFileClip
+    from moviepy import AudioFileClip
 
     voice = random.choice(TTS_VOICES)
     results = []
@@ -254,10 +281,12 @@ def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
 # ------------------------------------------------------------------
 
 def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -> Path:
-    from moviepy.editor import (
+    # moviepy v2 API: set_X methods were renamed to with_X, subclip ->
+    # subclipped, and .resize()/.loop() are now applied via vfx effects
+    # through .with_effects([...]) instead of being direct methods.
+    from moviepy import (
         AudioFileClip, ImageClip, VideoFileClip, CompositeVideoClip,
-        TextClip, concatenate_audioclips, concatenate_videoclips,
-        CompositeAudioClip,
+        TextClip, concatenate_videoclips, vfx,
     )
 
     scene_clips = []
@@ -271,33 +300,30 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -
             clip = VideoFileClip(str(visual["path"])).without_audio()
             # loop or trim to match narration duration
             if clip.duration < duration:
-                clip = clip.loop(duration=duration)
+                clip = clip.with_effects([vfx.Loop(duration=duration)])
             else:
-                clip = clip.subclip(0, duration)
+                clip = clip.subclipped(0, duration)
         else:
-            clip = ImageClip(str(visual["path"])).set_duration(duration)
+            clip = ImageClip(str(visual["path"])).with_duration(duration)
 
-        clip = clip.resize(height=VIDEO_H).set_position("center")
+        clip = clip.with_effects([vfx.Resize(height=VIDEO_H)]).with_position("center")
 
         # simple caption burned onto each scene (swap for your existing
         # caption/text styling system if you already have one)
-        caption = (
-            TextClip(
-                scene["narration"],
-                fontsize=54,
-                color="yellow",
-                stroke_color="black",
-                stroke_width=2,
-                method="caption",
-                size=(VIDEO_W - 120, None),
-                align="center",
-            )
-            .set_position(("center", "center"))
-            .set_duration(duration)
-        )
+        caption = TextClip(
+            text=scene["narration"],
+            font_size=54,
+            color="yellow",
+            stroke_color="black",
+            stroke_width=2,
+            method="caption",
+            size=(VIDEO_W - 120, None),
+            text_align="center",
+            duration=duration,
+        ).with_position(("center", "center"))
 
         composite = CompositeVideoClip([clip, caption], size=(VIDEO_W, VIDEO_H))
-        composite = composite.set_audio(audio)
+        composite = composite.with_audio(audio)
         scene_clips.append(composite)
 
     final = concatenate_videoclips(scene_clips, method="compose")
