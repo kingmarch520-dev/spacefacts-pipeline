@@ -50,3 +50,25 @@ export async function deleteVideo(videoId) {
     throw new Error(`YouTube delete failed: ${await resp.text()}`);
   }
 }
+
+export async function getVideoStats(videoIds) {
+  // videos.list accepts up to 50 comma-separated ids per call
+  if (!videoIds.length) return {};
+  const accessToken = await getAccessToken();
+  const idsParam = videoIds.join(",");
+  const resp = await fetch(
+    `https://www.googleapis.com/youtube/v3/videos?part=statistics&id=${idsParam}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!resp.ok) throw new Error(`YouTube stats fetch failed: ${await resp.text()}`);
+  const data = await resp.json();
+
+  const statsMap = {};
+  for (const item of data.items || []) {
+    statsMap[item.id] = {
+      viewCount: parseInt(item.statistics.viewCount || "0", 10),
+      likeCount: parseInt(item.statistics.likeCount || "0", 10),
+    };
+  }
+  return statsMap;
+}
