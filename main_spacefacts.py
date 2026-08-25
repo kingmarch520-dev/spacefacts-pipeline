@@ -1,6 +1,6 @@
 """
 ==================================================================
-SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v2 - Fixed)
+SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v2)
 ==================================================================
 All 100% free. Includes retries, fact-checking, dynamic captions,
 crossfades, punchline SFX, caching, parallel TTS, and dry-run.
@@ -173,7 +173,7 @@ Topic: {topic}
 def generate_hook_variants(topic: str, count: int = 3) -> list:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-3.5-flash")
     prompt = f"Write {count} extremely short, scroll-stopping hooks (max 6 words each) for a YouTube Short about: {topic}. Return ONLY a JSON list of strings, no other text."
     try:
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
@@ -187,20 +187,20 @@ def generate_hook_variants(topic: str, count: int = 3) -> list:
 def fact_check(script_text: str) -> bool:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-3.5-flash")
     prompt = f"Is the following fact accurate? Reply ONLY 'Yes' or 'No'.\n\n{script_text}"
     try:
         response = model.generate_content(prompt)
         if response.text:
             return response.text.strip().lower().startswith("yes")
     except Exception as e:
-        log(f"  Fact check check failed to run: {e}")
+        log(f"  Fact check failed to run: {e}")
     return True
 
 def generate_script(topic: str) -> dict:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-3.5-flash")
 
     log("  Generating hook variants...")
     hooks = generate_hook_variants(topic)
@@ -222,7 +222,6 @@ def generate_script(topic: str) -> dict:
 
             data["hook"] = best_hook
             
-            # Apply hook without duplicating text
             first_narration = data["scenes"][0].get("narration", "")
             if "." in first_narration:
                 rest = first_narration.split(".", 1)[1].strip()
@@ -329,7 +328,7 @@ def fetch_pexels_video_with_fallback(query: str, out_path: Path) -> Path | None:
 def get_cached_visual(scene: dict, index: int, run_dir: Path) -> dict:
     q = scene["visual_query"]
     key = cache_key(q)
-    
+
     pexels_dir = CACHE_DIR / "pexels"
     pollinations_dir = CACHE_DIR / "pollinations"
 
@@ -338,7 +337,6 @@ def get_cached_visual(scene: dict, index: int, run_dir: Path) -> dict:
         if cache_path:
             return {"type": "video", "path": cache_path}
 
-        # Cache miss or invalid – try to download
         out_path = run_dir / f"visual_{index}.mp4"
         result = fetch_pexels_video_with_fallback(q, out_path)
         if result:
@@ -347,7 +345,6 @@ def get_cached_visual(scene: dict, index: int, run_dir: Path) -> dict:
 
         log(f"    Pexels failed, falling back to Pollinations for: {q}")
 
-    # Abstract OR fallback from literal:
     enhanced_prompt = f"{q}, cinematic, dramatic lighting, photorealistic, 8k, highly detailed"
     key = cache_key(enhanced_prompt)
     cache_path = get_cached_file(pollinations_dir, key, "jpg")
@@ -366,7 +363,6 @@ def get_cached_visual(scene: dict, index: int, run_dir: Path) -> dict:
     except Exception as e:
         log(f"    Pollinations error: {e}")
 
-    # Ultimate fallback: black screen
     from moviepy import ColorClip
     fallback_path = run_dir / f"visual_{index}_fallback.jpg"
     clip = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0, 0, 0)).with_duration(1)
