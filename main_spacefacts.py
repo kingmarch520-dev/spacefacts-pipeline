@@ -121,7 +121,9 @@ def cache_key(data: str) -> str:
 
 def get_cached_file(cache_subdir: Path, key: str, ext: str) -> Path | None:
     p = cache_subdir / f"{key}.{ext}"
-    return p if p.exists() else None
+    if p.exists() and p.stat().st_size > 1000:   # validate size
+        return p
+    return None
 
 def save_cache_file(cache_subdir: Path, key: str, ext: str, content: bytes) -> Path:
     p = cache_subdir / f"{key}.{ext}"
@@ -298,14 +300,17 @@ def get_cached_visual(scene: dict, index: int, run_dir: Path) -> dict:
         if cache_path:
             return {"type": "video", "path": cache_path}
 
+        # Cache miss or invalid – try to download
         out_path = run_dir / f"visual_{index}.mp4"
         result = fetch_pexels_video_with_fallback(q, out_path)
         if result:
+            # Save to global cache (overwrite if exists)
             cached = save_cache_file(CACHE_DIR / "pexels", key, "mp4", result.read_bytes())
             return {"type": "video", "path": cached}
 
         log(f"    Pexels failed, falling back to Pollinations for: {q}")
 
+    # Abstract OR fallback from literal:
     enhanced_prompt = f"{q}, cinematic, dramatic lighting, photorealistic, 8k, highly detailed"
     key = cache_key(enhanced_prompt)
     cache_path = get_cached_file(CACHE_DIR / "pollinations", key, "jpg")
@@ -405,6 +410,13 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
                 continue
 
             visual = visuals[i]
+            # Double‑check that the visual file actually exists
+            if not visual["path"].exists():
+                log(f"  Visual file missing for scene {i}, re‑fetching...")
+                # Regenerate this visual and update the list
+                visuals[i] = get_cached_visual(scene, i, run_dir)
+                visual = visuals[i]
+
             if visual["type"] == "video":
                 clip = VideoFileClip(str(visual["path"])).without_audio()
                 if clip.duration < duration:
