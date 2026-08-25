@@ -6,8 +6,6 @@ export async function getServerSideProps() {
   return { props: { initialVideos: videos } };
 }
 
-// Simple keyword heuristic to bucket a topic into space vs sea, since
-// that split isn't stored explicitly in the database.
 const SEA_KEYWORDS = [
   "ocean", "sea", "deep", "trench", "squid", "whale", "hydrothermal",
   "bioluminescence", "underwater", "marine", "mariana",
@@ -29,6 +27,7 @@ export default function Dashboard({ initialVideos }) {
   const [videos, setVideos] = useState(initialVideos);
   const [pendingId, setPendingId] = useState(null);
   const [stats, setStats] = useState({});
+  const [triggerStatus, setTriggerStatus] = useState("");
 
   async function refresh() {
     const res = await fetch("/api/videos");
@@ -78,11 +77,27 @@ export default function Dashboard({ initialVideos }) {
     setPendingId(null);
   }
 
+  // ─── Trigger the GitHub Actions pipeline ───
+  async function triggerPipeline() {
+    setTriggerStatus("⏳ Starting...");
+    try {
+      const res = await fetch("/api/trigger", { method: "POST" });
+      const data = await res.json();
+      if (res.ok) {
+        setTriggerStatus("✅ " + data.message);
+      } else {
+        setTriggerStatus("❌ " + data.error);
+      }
+    } catch (err) {
+      setTriggerStatus("❌ " + err.message);
+    }
+    // Auto‑clear after 5 seconds
+    setTimeout(() => setTriggerStatus(""), 5000);
+  }
+
   const pendingReview = videos.filter((v) => v.status === "unlisted");
   const decided = videos.filter((v) => v.status !== "unlisted");
 
-  // space vs sea average views, published videos only (unlisted videos
-  // rarely have meaningful view counts yet)
   const published = videos.filter((v) => v.status === "public");
   const bySpace = published.filter((v) => categorize(v.topic) === "space");
   const bySea = published.filter((v) => categorize(v.topic) === "sea");
@@ -106,8 +121,16 @@ export default function Dashboard({ initialVideos }) {
           <div className="label">Spacefacts / Control</div>
           <h1>Upload queue</h1>
         </div>
-        <div className="count">
-          {pendingReview.length} awaiting review
+        <div className="header-actions">
+          <div className="count">{pendingReview.length} awaiting review</div>
+          <button
+            className="btn-trigger"
+            onClick={triggerPipeline}
+            disabled={!!triggerStatus}
+          >
+            ⚡ Run
+          </button>
+          {triggerStatus && <span className="trigger-status">{triggerStatus}</span>}
         </div>
       </div>
 
