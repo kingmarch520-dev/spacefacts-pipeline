@@ -95,6 +95,20 @@ TOPIC_POOL = [
 ]
 
 # ------------------------------------------------------------------
+# BACKGROUND AUDIO CONFIG (NEW)
+# ------------------------------------------------------------------
+BACKGROUND_AUDIO_ENABLED = True
+BACKGROUND_AUDIO_VOLUME = 0.15   # 0.0–1.0, relative to narration
+
+# Choose public, royalty‑free tracks. Replace with your own URLs if you like.
+# These are from SoundHelix – free to use for any purpose.
+SPACE_BG_AUDIO_URL = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3"
+OCEAN_BG_AUDIO_URL = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3"
+
+BACKGROUND_CACHE_DIR = Path("background_cache")
+BACKGROUND_CACHE_DIR.mkdir(exist_ok=True)
+
+# ------------------------------------------------------------------
 # STATE HANDLING (sequential topic cycling, same pattern as before)
 # ------------------------------------------------------------------
 
@@ -277,16 +291,43 @@ def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
         return {"type": "image", "path": out_path}
 
 # ------------------------------------------------------------------
+# 3.5 BACKGROUND AUDIO HELPER (NEW)
+# ------------------------------------------------------------------
+def get_background_audio(topic: str) -> Path | None:
+    """Return local path to a background audio file, downloading if needed."""
+    if not BACKGROUND_AUDIO_ENABLED:
+        return None
+
+    # Choose track based on topic
+    if any(word in topic.lower() for word in ("ocean", "sea", "mariana", "water", "deep")):
+        url = OCEAN_BG_AUDIO_URL
+    else:
+        url = SPACE_BG_AUDIO_URL
+
+    filename = url.split("/")[-1]
+    local_path = BACKGROUND_CACHE_DIR / filename
+
+    if not local_path.exists():
+        try:
+            print(f"      Downloading background audio from {url} ...")
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            local_path.write_bytes(r.content)
+        except Exception as e:
+            print(f"      Warning: could not download background audio: {e}")
+            return None
+
+    return local_path
+
+# ------------------------------------------------------------------
 # 4. ASSEMBLY (moviepy) — sync each visual to its scene's audio length
+#    (UPDATED to include background audio mixing)
 # ------------------------------------------------------------------
 
-def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -> Path:
-    # moviepy v2 API: set_X methods were renamed to with_X, subclip ->
-    # subclipped, and .resize()/.loop() are now applied via vfx effects
-    # through .with_effects([...]) instead of being direct methods.
+def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, topic: str) -> Path:
     from moviepy import (
         AudioFileClip, ImageClip, VideoFileClip, CompositeVideoClip,
-        TextClip, concatenate_videoclips, vfx,
+        TextClip, concatenate_videoclips, vfx, CompositeAudioClip,
     )
 
     scene_clips = []
@@ -298,7 +339,6 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -
 
         if visual["type"] == "video":
             clip = VideoFileClip(str(visual["path"])).without_audio()
-            # loop or trim to match narration duration
             if clip.duration < duration:
                 clip = clip.with_effects([vfx.Loop(duration=duration)])
             else:
@@ -308,8 +348,6 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -
 
         clip = clip.with_effects([vfx.Resize(height=VIDEO_H)]).with_position("center")
 
-        # simple caption burned onto each scene (swap for your existing
-        # caption/text styling system if you already have one)
         caption = TextClip(
             text=scene["narration"],
             font_size=54,
@@ -327,6 +365,20 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -
         scene_clips.append(composite)
 
     final = concatenate_videoclips(scene_clips, method="compose")
+
+    # --- ADD BACKGROUND AUDIO --- (NEW)
+    bg_path = get_background_audio(topic)
+    if bg_path is not None and final.duration > 0:
+        try:
+            bg = AudioFileClip(str(bg_path))
+            bg = bg.with_effects([vfx.Loop(duration=final.duration)])
+            bg = bg.with_volume(BACKGROUND_AUDIO_VOLUME)
+            if final.audio is not None:
+                final = final.with_audio(CompositeAudioClip([final.audio, bg]))
+            else:
+                final = final.with_audio(bg)
+        except Exception as e:
+            print(f"      Warning: could not add background audio: {e}")
 
     out_path = run_dir / "final_video.mp4"
     final.write_videofile(
@@ -358,7 +410,7 @@ def run_pipeline():
     ]
 
     print("[4/5] Assembling final video...")
-    final_path = build_video(script, audio_clips, visuals, run_dir)
+    final_path = build_video(script, audio_clips, visuals, run_dir, topic)   # <-- topic passed
 
     print("[5/5] Uploading to YouTube as unlisted + logging to dashboard...")
     description = (
@@ -370,7 +422,7 @@ def run_pipeline():
         title=script["title"],
         description=description,
         tags=[h.replace("#", "") for h in script["hashtags"]],
-        privacy_status="unlisted",  # previewable in the dashboard without login
+        privacy_status="unlisted",
     )
     video_id = upload_result["id"]
     thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
