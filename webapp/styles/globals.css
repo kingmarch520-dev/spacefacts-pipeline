@@ -1,14 +1,15 @@
 @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap");
 
+/* ─── Dark Blue‑Lavender Theme ─── */
 :root {
-  --bg: #F4F2FF;               /* soft lavender white */
-  --panel: #FFFFFF00;          /* transparent panel */
-  --panel-solid: #FFFFFF;      /* white panels (was #131828) */
-  --line: #D9D3FF;             /* lavender border (was #232b40) */
-  --text: #2A1F5C;             /* deep indigo (was #e7ecf7) */
-  --text-dim: #6B5F9E;         /* muted lavender (was #7d88a3) */
-  --amber: #7C6FFF;            /* use lavender as primary accent (was #f2b705) */
-  --green: #5B4DD6;            /* darker lavender for success (was #3ddc84) */
+  --bg: #0a0818;               /* deep navy‑purple background */
+  --panel: #11162400;
+  --panel-solid: #12102a;      /* dark purple panels */
+  --line: #2a2850;             /* lavender border */
+  --text: #e7ecf7;             /* light text */
+  --text-dim: #8a7bb5;         /* muted lavender */
+  --amber: #7C6FFF;            /* primary lavender accent */
+  --green: #5B4DD6;            /* darker lavender for publish */
   --red: #e5484d;              /* keep red for delete */
   --mono: "JetBrains Mono", monospace;
   --sans: "Inter", -apple-system, sans-serif;
@@ -23,21 +24,23 @@ html, body {
   color: var(--text);
   font-family: var(--sans);
   background-image:
-    radial-gradient(1px 1px at 20% 30%, #ffffff22 50%, transparent 50%),
-    radial-gradient(1px 1px at 70% 60%, #ffffff1a 50%, transparent 50%),
-    radial-gradient(1.5px 1.5px at 85% 15%, #ffffff26 50%, transparent 50%),
-    radial-gradient(1px 1px at 40% 80%, #ffffff18 50%, transparent 50%);
+    radial-gradient(1px 1px at 20% 30%, #7C6FFF22 50%, transparent 50%),
+    radial-gradient(1px 1px at 70% 60%, #7C6FFF1a 50%, transparent 50%),
+    radial-gradient(1.5px 1.5px at 85% 15%, #7C6FFF26 50%, transparent 50%),
+    radial-gradient(1px 1px at 40% 80%, #7C6FFF18 50%, transparent 50%);
   background-attachment: fixed;
 }
 
 a { color: inherit; }
 
+/* ─── Layout ─── */
 .wrap {
   max-width: 720px;
   margin: 0 auto;
   padding: 20px 16px 60px;
 }
 
+/* ─── Header ─── */
 .header {
   display: flex;
   align-items: baseline;
@@ -45,6 +48,8 @@ a { color: inherit; }
   border-bottom: 1px solid var(--line);
   padding-bottom: 14px;
   margin-bottom: 22px;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .header .label {
@@ -69,6 +74,99 @@ a { color: inherit; }
   text-align: right;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ─── Trigger Button (inline in header) ─── */
+.btn-trigger {
+  background: var(--amber);
+  color: #fff;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  transition: 0.2s;
+  white-space: nowrap;
+}
+.btn-trigger:hover {
+  filter: brightness(1.15);
+  transform: scale(1.02);
+}
+.btn-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+#triggerStatus {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-left: 8px;
+}
+
+/* ─── Summary / Stats ─── */
+.summary {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 20px;
+  background: linear-gradient(180deg, #12102acc, #0a081800);
+  backdrop-filter: blur(4px);
+}
+
+.summary-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+.summary-row {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.summary-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.summary-val {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--amber);
+}
+
+/* ─── Category Tags ─── */
+.summary-tag, .cat-tag {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 100px;
+}
+
+.summary-tag.space, .cat-tag.space {
+  color: #8fb8ff;
+  background: #8fb8ff18;
+}
+.summary-tag.sea, .cat-tag.sea {
+  color: #3ddcc7;
+  background: #3ddcc718;
+}
+
+/* ─── Video Entry ─── */
 .entry {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -76,8 +174,12 @@ a { color: inherit; }
   margin-bottom: 12px;
   display: flex;
   gap: 14px;
-  background: linear-gradient(180deg, #131828cc, #10142200);
+  background: linear-gradient(180deg, #12102acc, #0a081800);
   backdrop-filter: blur(6px);
+  transition: border-color 0.2s;
+}
+.entry:hover {
+  border-color: var(--amber);
 }
 
 .thumb {
@@ -87,7 +189,7 @@ a { color: inherit; }
   object-fit: cover;
   flex-shrink: 0;
   border: 1px solid var(--line);
-  background: #0d1120;
+  background: #0d0a1a;
 }
 
 .entry-body {
@@ -104,6 +206,10 @@ a { color: inherit; }
   color: var(--text-dim);
   text-transform: uppercase;
   margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .entry-title {
@@ -113,6 +219,7 @@ a { color: inherit; }
   margin: 0 0 8px;
 }
 
+/* ─── Status Badge ─── */
 .status {
   display: inline-flex;
   align-items: center;
@@ -134,17 +241,29 @@ a { color: inherit; }
   border-radius: 50%;
 }
 
-.status.unlisted { color: var(--amber); background: #f2b70518; }
+.status.unlisted { color: var(--amber); background: #7C6FFF18; }
 .status.unlisted::before { background: var(--amber); }
-.status.public { color: var(--green); background: #3ddc8418; }
-.status.public::before { background: var(--green); }
+
+.status.public { color: #3ddc84; background: #3ddc8418; }
+.status.public::before { background: #3ddc84; }
+
 .status.deleted { color: var(--red); background: #e5484d18; }
 .status.deleted::before { background: var(--red); }
 
+/* ─── View Count (inline with status) ─── */
+.views {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+/* ─── Action Buttons ─── */
 .actions {
   display: flex;
   gap: 8px;
   margin-top: auto;
+  flex-wrap: wrap;
 }
 
 button {
@@ -157,22 +276,35 @@ button {
   background: transparent;
   color: var(--text);
   cursor: pointer;
+  transition: 0.2s;
+}
+button:hover {
+  filter: brightness(1.2);
+  transform: scale(1.02);
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+  transform: none;
+  filter: none;
 }
 
 button.publish {
   background: var(--green);
   border-color: var(--green);
-  color: #06170e;
+  color: #fff;
+}
+button.publish:hover {
+  background: #6f5fdc;
 }
 
 button.delete {
   color: var(--red);
   border-color: #e5484d40;
 }
-
-button:disabled {
-  opacity: 0.4;
-  cursor: default;
+button.delete:hover {
+  background: #e5484d18;
+  border-color: var(--red);
 }
 
 .watch-link {
@@ -181,68 +313,33 @@ button:disabled {
   color: var(--text-dim);
   text-decoration: none;
   align-self: center;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  transition: 0.2s;
+}
+.watch-link:hover {
+  color: var(--amber);
+  border-color: var(--line);
 }
 
-.summary {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 14px;
-  margin-bottom: 20px;
-  background: linear-gradient(180deg, #131828cc, #10142200);
-}
-
-.summary-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
+/* ─── Empty State ─── */
+.empty {
+  text-align: center;
+  padding: 60px 20px;
   color: var(--text-dim);
-  text-transform: uppercase;
-  margin-bottom: 10px;
-}
-
-.summary-row {
-  display: flex;
-  gap: 24px;
-}
-
-.summary-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.summary-val {
   font-family: var(--mono);
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 13px;
 }
 
-.summary-tag, .cat-tag {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 2px 7px;
-  border-radius: 100px;
-}
-
-.summary-tag.space, .cat-tag.space {
-  color: #8fb8ff;
-  background: #8fb8ff18;
-}
-
-.summary-tag.sea, .cat-tag.sea {
-  color: #3ddcc7;
-  background: #3ddcc718;
-}
-
+/* ─── Entry Row (for inline layout) ─── */
 .entry-row {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-bottom: 10px;
+  flex-wrap: wrap;
 }
-
 .entry-row .status {
   margin-bottom: 0;
 }
@@ -255,10 +352,25 @@ button:disabled {
   color: var(--text-dim);
 }
 
-.empty {
-  text-align: center;
-  padding: 60px 20px;
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 13px;
+/* ─── Trigger button (large version for below summary) ─── */
+.btn-trigger-large {
+  background: var(--amber);
+  color: #fff;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: 0.2s;
+}
+.btn-trigger-large:hover {
+  filter: brightness(1.15);
+  transform: scale(1.02);
+}
+.btn-trigger-large:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
 }
