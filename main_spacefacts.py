@@ -495,4 +495,4 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
             sfx = sfx.with_start(final.duration - 0.8)
             final = final.with_audio(CompositeAudioClip([final.audio, sfx]))
         except Exception as e:
-            log(f"  SFX overlay failed:
+            log(f"  SFX overlay failed: {e}")
