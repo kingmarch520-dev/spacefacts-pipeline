@@ -1,14 +1,31 @@
 """
 ==================================================================
-SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v1.5)
+SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE
 ==================================================================
-Stable core with:
-- Caching (TTS + visuals)
-- Parallel TTS
-- Retries & better error handling
-- Optional background audio
-- Dry-run mode
-- Enhanced logging
+Built for Google Colab. Run cells top to bottom, or paste into
+one cell and execute.
+
+WHAT THIS DOES DIFFERENTLY FROM YOUR OLD PIPELINE:
+1. Script generation returns scene-by-scene JSON (not one blob),
+   so every line of narration has its own matching visual.
+2. Each scene is tagged "literal" or "abstract":
+   - literal  -> searched on Pexels (real stock footage)
+   - abstract -> generated with Pollinations.ai (AI image), for
+     concepts that don't exist as real footage (time dilation,
+     event horizons, gravity wells, etc.)
+3. Narration uses Edge TTS instead of gTTS — free, no API key,
+   much more natural prosody.
+4. Script-writing prompt is engineered to avoid "AI voice" —
+   no rhetorical filler, no stacked intensifiers, contractions,
+   varied sentence rhythm.
+
+REQUIRED INSTALLS (run first in Colab):
+    !pip install google-generativeai edge-tts moviepy pillow requests --quiet
+
+REQUIRED API KEYS (set as Colab secrets or env vars):
+    GEMINI_API_KEY   -> https://aistudio.google.com/apikey (free)
+    PEXELS_API_KEY   -> https://www.pexels.com/api/ (free)
+    Pollinations needs NO KEY — it's a plain GET request.
 ==================================================================
 """
 
@@ -16,13 +33,9 @@ import os
 import json
 import random
 import asyncio
-import time
-import hashlib
-import urllib.parse
-from pathlib import Path
-from datetime import datetime
-
 import requests
+from pathlib import Path
+
 import youtube_upload
 import supabase_client
 
@@ -33,31 +46,25 @@ import supabase_client
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "PASTE_YOUR_KEY_HERE")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "PASTE_YOUR_KEY_HERE")
 
-DRY_RUN = False                     # Set True to skip upload/logging
-
 STATE_FILE = Path("state_spacefacts.json")
 OUTPUT_DIR = Path("output_spacefacts")
-CACHE_DIR = Path("cache_spacefacts")   # NEW: global cache for TTS/visuals
 OUTPUT_DIR.mkdir(exist_ok=True)
-CACHE_DIR.mkdir(exist_ok=True)
 
-# Optional background audio (toggle)
-BACKGROUND_AUDIO_ENABLED = True
-BACKGROUND_AUDIO_VOLUME = 0.10
-SPACE_BG_AUDIO_URL = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3"
-OCEAN_BG_AUDIO_URL = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3"
-BACKGROUND_CACHE_DIR = CACHE_DIR / "bg"
-BACKGROUND_CACHE_DIR.mkdir(exist_ok=True)
+VIDEO_W, VIDEO_H = 1080, 1920  # vertical shorts
 
-VIDEO_W, VIDEO_H = 1080, 1920
-
+# Rotate between a small, consistent set of Edge TTS voices.
+# Pick calm/explainer-toned voices, not overly dramatic ones.
 TTS_VOICES = [
-    "en-US-GuyNeural",
-    "en-GB-RyanNeural",
-    "en-US-JennyNeural",
-    "en-AU-WilliamNeural",
+    "en-US-GuyNeural",       # calm male
+    "en-GB-RyanNeural",      # measured British male
+    "en-US-JennyNeural",     # warm female, explainer tone
+    "en-AU-WilliamNeural",   # relaxed Australian male
 ]
 
+# A rotating pool of sub-topics so state.json cycles through fresh
+# angles instead of repeating. Two lanes: space/physics and sea/ocean —
+# both are "scale and mystery" facts, which is why the black hole video
+# worked, so the ocean side is picked to hit the same nerve.
 TOPIC_POOL = [
     # space / physics
     "gravitational time dilation near a black hole",
@@ -88,14 +95,7 @@ TOPIC_POOL = [
 ]
 
 # ------------------------------------------------------------------
-# LOGGING
-# ------------------------------------------------------------------
-
-def log(msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-
-# ------------------------------------------------------------------
-# STATE
+# STATE HANDLING (sequential topic cycling, same pattern as before)
 # ------------------------------------------------------------------
 
 def load_state():
@@ -115,26 +115,7 @@ def get_next_topic():
     return topic
 
 # ------------------------------------------------------------------
-# CACHE HELPERS
-# ------------------------------------------------------------------
-
-def cache_key(data: str) -> str:
-    return hashlib.md5(data.encode()).hexdigest()[:16]
-
-def get_cached_file(cache_subdir: Path, key: str, ext: str) -> Path | None:
-    p = cache_subdir / f"{key}.{ext}"
-    if p.exists() and p.stat().st_size > 1000:
-        return p
-    return None
-
-def save_cache_file(cache_subdir: Path, key: str, ext: str, content: bytes) -> Path:
-    p = cache_subdir / f"{key}.{ext}"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(content)
-    return p
-
-# ------------------------------------------------------------------
-# 1. SCRIPT GENERATION (with retries and optional hook variants)
+# 1. SCRIPT GENERATION (Gemini) — scene-segmented, "less AI" prompt
 # ------------------------------------------------------------------
 
 SCRIPT_SYSTEM_PROMPT = """You are writing a 30-45 second YouTube Shorts script
@@ -157,15 +138,25 @@ Rules for how it should sound:
 - The FINAL scene must be a short joke or pun directly related to the
   fact — one line, genuinely funny, not corny "dad joke for the sake
   of it" filler. It should feel like a natural button on the video, the
-  kind of line that gets a laugh-comment.
+  kind of line that gets a laugh-comment. If a clean pun exists in the
+  topic (e.g. wordplay on the animal, phenomenon, or scientific term),
+  prefer that over a generic joke.
 
 Break the script into scenes. Each scene is one or two sentences of
 narration, including the final joke scene. For each scene, also provide
 a visual:
 - visual_type: "literal" if real stock footage of this exists
+  (e.g. a dam, the ISS, a starfield, a person walking)
 - visual_type: "abstract" if it's a concept with no real footage
+  (e.g. gravitational time dilation, a wormhole cross-section,
+  spacetime curvature)
 - visual_query: for "literal", a 3-6 word stock footage search term.
-  For "abstract", a descriptive AI image generation prompt (be cinematic).
+  For "abstract", a descriptive AI image generation prompt (can be
+  longer, be specific and cinematic).
+- For the final joke scene, pick whichever visual actually supports
+  the punchline (often literal — the animal/phenomenon reacting, or
+  a simple relevant clip works better than an abstract image for comedic
+  timing).
 
 Return ONLY valid JSON, no markdown fences, no commentary, in this
 exact shape:
@@ -186,231 +177,116 @@ exact shape:
 Topic: {topic}
 """
 
-def generate_script(topic: str, use_hook_variants: bool = True) -> dict:
+def generate_script(topic: str) -> dict:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel("gemini-3.6-flash")
 
-    # Optional: generate multiple hooks and pick the shortest
-    if use_hook_variants:
-        try:
-            hook_prompt = f"Write 3 extremely short, scroll-stopping hooks (max 6 words each) for a YouTube Short about: {topic}. Return ONLY a JSON list of strings, no other text."
-            hook_resp = model.generate_content(hook_prompt, generation_config={"response_mime_type": "application/json"})
-            hooks = json.loads(hook_resp.text)
-            best_hook = sorted(hooks, key=len)[0]  # shortest
-            log(f"  Best hook: '{best_hook}'")
-        except Exception:
-            best_hook = None
-    else:
-        best_hook = None
+    prompt = SCRIPT_SYSTEM_PROMPT.replace("{topic}", topic)
+    response = model.generate_content(
+        prompt,
+        generation_config={"response_mime_type": "application/json"},
+    )
 
-    for attempt in range(4):   # retry up to 4 times
-        try:
-            prompt = SCRIPT_SYSTEM_PROMPT.replace("{topic}", topic)
-            response = model.generate_content(
-                prompt,
-                generation_config={"response_mime_type": "application/json"},
-            )
-            data = json.loads(response.text)
+    data = json.loads(response.text)
 
-            # Replace hook if we generated one
-            if best_hook:
-                data["hook"] = best_hook
-                # Prepend hook to first scene's narration (if it doesn't already contain it)
-                first = data["scenes"][0]["narration"]
-                if not first.startswith(best_hook):
-                    data["scenes"][0]["narration"] = best_hook + " " + first
+    # basic validation so a bad Gemini response doesn't silently
+    # break the rest of the pipeline
+    assert "scenes" in data and len(data["scenes"]) > 0, "No scenes returned"
+    for scene in data["scenes"]:
+        assert scene["visual_type"] in ("literal", "abstract")
 
-            # Basic validation
-            assert "scenes" in data and len(data["scenes"]) > 0
-            for scene in data["scenes"]:
-                assert scene["visual_type"] in ("literal", "abstract")
-            return data
-
-        except Exception as e:
-            log(f"  Script attempt {attempt+1} failed: {e}")
-            time.sleep(2 ** attempt)
-
-    raise RuntimeError("Failed to generate a valid script after retries.")
+    return data
 
 # ------------------------------------------------------------------
-# 2. NARRATION (parallel Edge TTS with caching)
+# 2. NARRATION (Edge TTS) — per scene, so we know each clip's timing
 # ------------------------------------------------------------------
 
-async def _synthesize_one(text: str, voice: str, out_path: Path):
+async def _synthesize(text: str, voice: str, out_path: Path):
     import edge_tts
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(str(out_path))
 
-async def _synthesize_all(scenes: list, run_dir: Path, voice: str, cache_subdir: Path = None):
-    tasks = []
-    for i, scene in enumerate(scenes):
-        # Use caching if cache_subdir provided
-        if cache_subdir:
-            key = cache_key(scene["narration"] + voice)
-            cached = get_cached_file(cache_subdir, key, "mp3")
-            if cached:
-                # Copy cached file to run_dir (or use directly)
-                target = run_dir / f"scene_{i}.mp3"
-                target.write_bytes(cached.read_bytes())
-                continue
-        out_path = run_dir / f"scene_{i}.mp3"
-        tasks.append(_synthesize_one(scene["narration"], voice, out_path))
-
-    if tasks:
-        await asyncio.gather(*tasks)
-
-    # Now return all paths (may include cached ones)
-    paths = []
-    for i in range(len(scenes)):
-        p = run_dir / f"scene_{i}.mp3"
-        if p.exists():
-            # If cache_subdir and not already cached, save it
-            if cache_subdir:
-                key = cache_key(scenes[i]["narration"] + voice)
-                if not get_cached_file(cache_subdir, key, "mp3"):
-                    save_cache_file(cache_subdir, key, "mp3", p.read_bytes())
-            paths.append(p)
-        else:
-            raise FileNotFoundError(f"Scene {i} audio missing")
-    return paths
-
 def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
+    """Generates one mp3 per scene, returns list of (path, duration)."""
     from moviepy import AudioFileClip
+
     voice = random.choice(TTS_VOICES)
-    log(f"  TTS voice: {voice}")
-
-    # Use a global TTS cache
-    tts_cache = CACHE_DIR / "tts"
-    tts_cache.mkdir(exist_ok=True)
-
-    # Ensure we have a fresh event loop (safe for Colab)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    paths = loop.run_until_complete(_synthesize_all(scenes, run_dir, voice, tts_cache))
-    loop.close()
-
     results = []
-    for i, path in enumerate(paths):
-        duration = AudioFileClip(str(path)).duration
-        results.append({"path": path, "duration": duration})
+
+    for i, scene in enumerate(scenes):
+        out_path = run_dir / f"scene_{i}.mp3"
+        asyncio.run(_synthesize(scene["narration"], voice, out_path))
+        duration = AudioFileClip(str(out_path)).duration
+        results.append({"path": out_path, "duration": duration})
+
     return results
 
 # ------------------------------------------------------------------
-# 3. VISUALS — Pexels (with retries) + Pollinations (with fallback)
+# 3. VISUALS — Pexels for literal, Pollinations for abstract
 # ------------------------------------------------------------------
 
-def fetch_pexels_video(query: str, out_path: Path, max_retries: int = 2) -> Path | None:
+def fetch_pexels_video(query: str, out_path: Path) -> Path | None:
+    """Downloads a short vertical-friendly stock clip matching query."""
     headers = {"Authorization": PEXELS_API_KEY}
     url = "https://api.pexels.com/videos/search"
     params = {"query": query, "orientation": "portrait", "per_page": 5}
 
-    for attempt in range(max_retries + 1):
-        try:
-            r = requests.get(url, headers=headers, params=params, timeout=20)
-            r.raise_for_status()
-            videos = r.json().get("videos", [])
-            if not videos:
-                return None
+    r = requests.get(url, headers=headers, params=params, timeout=20)
+    r.raise_for_status()
+    videos = r.json().get("videos", [])
+    if not videos:
+        return None
 
-            video = random.choice(videos[: min(3, len(videos))])
-            files = sorted(video["video_files"], key=lambda f: f.get("width", 0))
-            chosen = next((f for f in files if f.get("width", 0) >= 720), files[-1])
+    # pick a random one of the top results so repeated topics don't
+    # always reuse the exact same clip
+    video = random.choice(videos[: min(3, len(videos))])
+    # prefer a moderate-resolution vertical file
+    files = sorted(video["video_files"], key=lambda f: f.get("width", 0))
+    chosen = next((f for f in files if f.get("width", 0) >= 720), files[-1])
 
-            video_data = requests.get(chosen["link"], timeout=30).content
-            if len(video_data) > 1000:
-                out_path.write_bytes(video_data)
-                return out_path
-        except Exception as e:
-            log(f"    Pexels attempt {attempt+1} failed: {e}")
-            time.sleep(2 ** attempt)
-    return None
+    video_data = requests.get(chosen["link"], timeout=30).content
+    out_path.write_bytes(video_data)
+    return out_path
 
-def fetch_pollinations_image(prompt: str, out_path: Path) -> Path | None:
+def fetch_pollinations_image(prompt: str, out_path: Path) -> Path:
+    """Free, no-key AI image generation for abstract concepts."""
+    import urllib.parse
     encoded = urllib.parse.quote(prompt)
+    # width/height tuned for vertical shorts
     url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true"
-    try:
-        r = requests.get(url, timeout=60)
-        r.raise_for_status()
-        if len(r.content) > 1000:
-            out_path.write_bytes(r.content)
-            return out_path
-    except Exception as e:
-        log(f"    Pollinations error: {e}")
-    return None
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    out_path.write_bytes(r.content)
+    return out_path
 
 def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
-    # Check global cache first (by visual_query hash)
-    q = scene["visual_query"]
-    key = cache_key(q)
-    if scene["visual_type"] == "literal":
-        cache_subdir = CACHE_DIR / "pexels"
-        cache_subdir.mkdir(exist_ok=True)
-        cached = get_cached_file(cache_subdir, key, "mp4")
-        if cached:
-            return {"type": "video", "path": cached}
-
-    # Abstract or no cache – generate
+    """Returns {'type': 'video'|'image', 'path': Path}."""
     if scene["visual_type"] == "literal":
         out_path = run_dir / f"visual_{index}.mp4"
         result = fetch_pexels_video(scene["visual_query"], out_path)
         if result:
-            # Save to global cache
-            save_cache_file(cache_subdir, key, "mp4", result.read_bytes())
             return {"type": "video", "path": result}
-        # Fall through to Pollinations
-        log(f"  Pexels failed, falling back to Pollinations for: {q}")
-
-    # Abstract or fallback
-    enhanced_prompt = f"{q}, cinematic, dramatic lighting, photorealistic, 8k"
-    key = cache_key(enhanced_prompt)
-    cache_subdir = CACHE_DIR / "pollinations"
-    cache_subdir.mkdir(exist_ok=True)
-    cached = get_cached_file(cache_subdir, key, "jpg")
-    if cached:
-        return {"type": "image", "path": cached}
-
-    out_path = run_dir / f"visual_{index}.jpg"
-    result = fetch_pollinations_image(enhanced_prompt, out_path)
-    if result:
-        save_cache_file(cache_subdir, key, "jpg", result.read_bytes())
-        return {"type": "image", "path": result}
-
-    # Ultimate fallback: solid color frame
-    from moviepy import ColorClip
-    fallback_path = run_dir / f"visual_{index}_fallback.jpg"
-    clip = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0, 0, 0), duration=1)
-    clip.save_frame(str(fallback_path))
-    return {"type": "image", "path": fallback_path}
-
-# ------------------------------------------------------------------
-# 4. ASSEMBLY (with optional background audio)
-# ------------------------------------------------------------------
-
-def get_background_audio(topic: str) -> Path | None:
-    if not BACKGROUND_AUDIO_ENABLED:
-        return None
-    if any(w in topic.lower() for w in ("ocean", "sea", "mariana", "water", "deep")):
-        url = OCEAN_BG_AUDIO_URL
+        # fall back to an AI image if Pexels has nothing usable
+        fallback_path = run_dir / f"visual_{index}.jpg"
+        fetch_pollinations_image(scene["visual_query"], fallback_path)
+        return {"type": "image", "path": fallback_path}
     else:
-        url = SPACE_BG_AUDIO_URL
-    key = cache_key(url)
-    cached = get_cached_file(BACKGROUND_CACHE_DIR, key, "mp3")
-    if cached:
-        return cached
-    try:
-        log("  Downloading background audio...")
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        return save_cache_file(BACKGROUND_CACHE_DIR, key, "mp3", r.content)
-    except Exception as e:
-        log(f"  Background download failed: {e}")
-        return None
+        out_path = run_dir / f"visual_{index}.jpg"
+        fetch_pollinations_image(scene["visual_query"], out_path)
+        return {"type": "image", "path": out_path}
 
-def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, topic: str) -> Path:
+# ------------------------------------------------------------------
+# 4. ASSEMBLY (moviepy) — sync each visual to its scene's audio length
+# ------------------------------------------------------------------
+
+def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -> Path:
+    # moviepy v2 API: set_X methods were renamed to with_X, subclip ->
+    # subclipped, and .resize()/.loop() are now applied via vfx effects
+    # through .with_effects([...]) instead of being direct methods.
     from moviepy import (
         AudioFileClip, ImageClip, VideoFileClip, CompositeVideoClip,
-        TextClip, concatenate_videoclips, vfx, CompositeAudioClip
+        TextClip, concatenate_videoclips, vfx,
     )
 
     scene_clips = []
@@ -422,6 +298,7 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
 
         if visual["type"] == "video":
             clip = VideoFileClip(str(visual["path"])).without_audio()
+            # loop or trim to match narration duration
             if clip.duration < duration:
                 clip = clip.with_effects([vfx.Loop(duration=duration)])
             else:
@@ -429,15 +306,14 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
         else:
             clip = ImageClip(str(visual["path"])).with_duration(duration)
 
-        # Vertical resize and center
-        clip = clip.with_effects([vfx.Resize(height=VIDEO_H)]).with_position(("center", "center"))
+        clip = clip.with_effects([vfx.Resize(height=VIDEO_H)]).with_position("center")
 
-        # Nicer captions (white with black outline, larger font)
+        # simple caption burned onto each scene (swap for your existing
+        # caption/text styling system if you already have one)
         caption = TextClip(
             text=scene["narration"],
-            font="Arial",                    # safer default
-            font_size=56,
-            color="white",
+            font_size=54,
+            color="yellow",
             stroke_color="black",
             stroke_width=2,
             method="caption",
@@ -446,25 +322,11 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
             duration=duration,
         ).with_position(("center", "center"))
 
-        # Slight zoom effect on caption (optional)
-        caption = caption.with_effects([vfx.Resize(lambda t: 1 + 0.04 * (1 - t / duration))])
-
         composite = CompositeVideoClip([clip, caption], size=(VIDEO_W, VIDEO_H))
         composite = composite.with_audio(audio)
         scene_clips.append(composite)
 
     final = concatenate_videoclips(scene_clips, method="compose")
-
-    # Add background music
-    bg_path = get_background_audio(topic)
-    if bg_path and final.duration > 0:
-        try:
-            bg = AudioFileClip(str(bg_path))
-            bg = bg.with_effects([vfx.Loop(duration=final.duration)])
-            bg = bg.with_volume(BACKGROUND_AUDIO_VOLUME)
-            final = final.with_audio(CompositeAudioClip([final.audio, bg]))
-        except Exception as e:
-            log(f"  Background mix failed: {e}")
 
     out_path = run_dir / "final_video.mp4"
     final.write_videofile(
@@ -473,46 +335,42 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
     return out_path
 
 # ------------------------------------------------------------------
-# MAIN PIPELINE
+# MAIN
 # ------------------------------------------------------------------
 
 def run_pipeline():
     topic = get_next_topic()
-    log(f"Topic: {topic}")
-
-    log("Generating script...")
-    script = generate_script(topic, use_hook_variants=True)
-    log(f"Title: {script['title']}")
+    print(f"[1/4] Generating script for topic: {topic}")
+    script = generate_script(topic)
+    print(f"      Title: {script['title']}")
 
     run_dir = OUTPUT_DIR / script["title"].replace(" ", "_")[:40]
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "script.json").write_text(json.dumps(script, indent=2))
 
-    log("Synthesizing narration...")
+    print("[2/4] Synthesizing narration (Edge TTS)...")
     audio_clips = synthesize_scene_audio(script["scenes"], run_dir)
 
-    log("Fetching visuals...")
+    print("[3/4] Fetching visuals (Pexels + Pollinations)...")
     visuals = [
         fetch_visual_for_scene(scene, i, run_dir)
         for i, scene in enumerate(script["scenes"])
     ]
 
-    log("Assembling video...")
-    final_path = build_video(script, audio_clips, visuals, run_dir, topic)
+    print("[4/5] Assembling final video...")
+    final_path = build_video(script, audio_clips, visuals, run_dir)
 
-    if DRY_RUN:
-        log("DRY RUN: Skipping upload and logging.")
-        print(f"\n✅ Done: {final_path}")
-        return
-
-    log("Uploading to YouTube as unlisted...")
-    description = f"{script.get('hook', '')}\n\n{' '.join(script['hashtags'])}"
+    print("[5/5] Uploading to YouTube as unlisted + logging to dashboard...")
+    description = (
+        f"{script.get('hook', '')}\n\n"
+        f"{' '.join(script['hashtags'])}"
+    )
     upload_result = youtube_upload.upload_video(
         file_path=str(final_path),
         title=script["title"],
         description=description,
         tags=[h.replace("#", "") for h in script["hashtags"]],
-        privacy_status="unlisted",
+        privacy_status="unlisted",  # previewable in the dashboard without login
     )
     video_id = upload_result["id"]
     thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
@@ -527,9 +385,11 @@ def run_pipeline():
         status="unlisted",
     )
 
-    print(f"\n🎬 Done: {final_path}")
-    print(f"📺 YouTube (unlisted): https://youtu.be/{video_id}")
+    print(f"\nDone: {final_path}")
+    print(f"YouTube (unlisted): https://youtu.be/{video_id}")
     print("Review and publish from the dashboard.")
+    return final_path
+
 
 if __name__ == "__main__":
     run_pipeline()
