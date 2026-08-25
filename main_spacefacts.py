@@ -1,4 +1,4 @@
-```python
+
 """
 ==================================================================
 SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v2)
@@ -595,4 +595,3 @@ def run_pipeline():
 
 if __name__ == "__main__":
     run_pipeline()
-```
