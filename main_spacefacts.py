@@ -1,12 +1,5 @@
 
 """
-==================================================================
-SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v2)
-==================================================================
-All 100% free. Includes retries, fact-checking, dynamic captions,
-crossfades, punchline SFX, caching, parallel TTS, and dry-run.
-==================================================================
-"""
 
 print("Script started...")  # DEBUG
 
