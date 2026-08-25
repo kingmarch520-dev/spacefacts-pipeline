@@ -1,6 +1,6 @@
 """
 ==================================================================
-SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v2)
+SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v2 - Robust)
 ==================================================================
 All 100% free. Includes retries, fact-checking, dynamic captions,
 crossfades, punchline SFX, caching, parallel TTS, and dry-run.
@@ -101,6 +101,82 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 # ------------------------------------------------------------------
+# MOVIEPY COMPATIBILITY HELPERS
+# ------------------------------------------------------------------
+
+def apply_resize(clip, height=None, width=None, apply_func=None):
+    if apply_func is not None:
+        if hasattr(clip, "resized"):
+            return clip.resized(apply_func)
+        elif hasattr(clip, "resize"):
+            return clip.resize(apply_func)
+    if hasattr(clip, "resized"):
+        return clip.resized(height=height, width=width)
+    elif hasattr(clip, "resize"):
+        return clip.resize(height=height, width=width)
+    return clip
+
+def apply_loop(clip, duration):
+    if hasattr(clip, "looped"):
+        return clip.looped(duration=duration)
+    elif hasattr(clip, "loop"):
+        return clip.loop(duration=duration)
+    return clip
+
+def apply_volume(clip, factor):
+    if hasattr(clip, "with_volume_scaled"):
+        return clip.with_volume_scaled(factor)
+    elif hasattr(clip, "volumex"):
+        return clip.volumex(factor)
+    elif hasattr(clip, "multiply_volume"):
+        return clip.multiply_volume(factor)
+    return clip
+
+def safe_create_text_clip(text, font_size, color="white", stroke_color="black", stroke_width=2, size=None, duration=None, start=None, position=None):
+    from moviepy import TextClip
+    
+    font_candidates = ["DejaVu-Sans", "Liberation-Sans", "Arial", "sans-serif", None]
+    
+    for font in font_candidates:
+        try:
+            kwargs = {
+                "text": text,
+                "font_size": font_size,
+                "color": color,
+                "stroke_color": stroke_color,
+                "stroke_width": stroke_width,
+                "method": "caption",
+                "text_align": "center",
+            }
+            if size:
+                kwargs["size"] = size
+            if font:
+                kwargs["font"] = font
+                
+            clip = TextClip(**kwargs)
+            
+            if duration is not None:
+                clip = clip.with_duration(duration) if hasattr(clip, "with_duration") else clip.set_duration(duration)
+            if start is not None:
+                clip = clip.with_start(start) if hasattr(clip, "with_start") else clip.set_start(start)
+            if position is not None:
+                clip = clip.with_position(position) if hasattr(clip, "with_position") else clip.set_position(position)
+                
+            return clip
+        except Exception:
+            continue
+
+    # Absolute minimal fallback
+    clip = TextClip(text=text, font_size=font_size, color=color)
+    if duration is not None:
+        clip = clip.with_duration(duration) if hasattr(clip, "with_duration") else clip.set_duration(duration)
+    if start is not None:
+        clip = clip.with_start(start) if hasattr(clip, "with_start") else clip.set_start(start)
+    if position is not None:
+        clip = clip.with_position(position) if hasattr(clip, "with_position") else clip.set_position(position)
+    return clip
+
+# ------------------------------------------------------------------
 # STATE
 # ------------------------------------------------------------------
 
@@ -130,7 +206,7 @@ def cache_key(data: str) -> str:
 def get_cached_file(cache_subdir: Path, key: str, ext: str) -> Path | None:
     cache_subdir.mkdir(parents=True, exist_ok=True)
     p = cache_subdir / f"{key}.{ext}"
-    if p.exists() and p.stat().st_size > 1000:   # validate size
+    if p.exists() and p.stat().st_size > 1000:
         return p
     return None
 
@@ -365,7 +441,8 @@ def get_cached_visual(scene: dict, index: int, run_dir: Path) -> dict:
 
     from moviepy import ColorClip
     fallback_path = run_dir / f"visual_{index}_fallback.jpg"
-    clip = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0, 0, 0)).with_duration(1)
+    clip = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0, 0, 0))
+    clip = clip.with_duration(1) if hasattr(clip, "with_duration") else clip.set_duration(1)
     clip.save_frame(str(fallback_path))
     clip.close()
     return {"type": "image", "path": fallback_path}
@@ -430,7 +507,7 @@ def chunk_text(text: str) -> list:
 def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, topic: str) -> Path:
     from moviepy import (
         AudioFileClip, ImageClip, VideoFileClip, CompositeVideoClip,
-        TextClip, concatenate_videoclips, vfx, CompositeAudioClip, ColorClip
+        concatenate_videoclips, CompositeAudioClip, ColorClip
     )
 
     scene_clips = []
@@ -451,15 +528,19 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
                 visual = visuals[i]
 
             if visual["type"] == "video":
-                clip = VideoFileClip(str(visual["path"])).without_audio()
+                clip = VideoFileClip(str(visual["path"]))
+                if hasattr(clip, "without_audio"):
+                    clip = clip.without_audio()
                 if clip.duration < duration:
-                    clip = clip.with_effects([vfx.loop(duration=duration)])
+                    clip = apply_loop(clip, duration)
                 else:
-                    clip = clip.subclipped(0, duration)
+                    clip = clip.subclipped(0, duration) if hasattr(clip, "subclipped") else clip.subclip(0, duration)
             else:
-                clip = ImageClip(str(visual["path"])).with_duration(duration)
+                clip = ImageClip(str(visual["path"]))
+                clip = clip.with_duration(duration) if hasattr(clip, "with_duration") else clip.set_duration(duration)
 
-            clip = clip.with_effects([vfx.resized(height=VIDEO_H)]).with_position("center")
+            clip = apply_resize(clip, height=VIDEO_H)
+            clip = clip.with_position("center") if hasattr(clip, "with_position") else clip.set_position("center")
 
             # Captions
             chunks = chunk_text(scene["narration"])
@@ -467,43 +548,42 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
             caption_clips = []
             for j, chunk in enumerate(chunks):
                 start = j * chunk_duration
-                txt = TextClip(
+                txt = safe_create_text_clip(
                     text=chunk,
                     font_size=56,
                     color="white",
                     stroke_color="black",
                     stroke_width=2,
-                    font="DejaVu-Sans",
-                    method="caption",
                     size=(VIDEO_W - 100, None),
-                    text_align="center",
-                ).with_duration(chunk_duration).with_start(start).with_position(("center", "center"))
-
-                txt = txt.with_effects([vfx.resized(lambda t: 1 + 0.05 * (1 - t / max(chunk_duration, 0.01)))])
+                    duration=chunk_duration,
+                    start=start,
+                    position=("center", "center")
+                )
+                txt = apply_resize(txt, apply_func=lambda t: 1 + 0.05 * (1 - t / max(chunk_duration, 0.01)))
                 caption_clips.append(txt)
 
             composite = CompositeVideoClip([clip] + caption_clips, size=(VIDEO_W, VIDEO_H))
-            composite = composite.with_audio(audio)
+            composite = composite.with_audio(audio) if hasattr(composite, "with_audio") else composite.set_audio(audio)
             scene_clips.append(composite)
             log(f"  Scene {i} composed successfully")
 
         except Exception as e:
             log(f"  ❌ Scene {i} failed: {e}")
             try:
-                fallback = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0, 0, 0)).with_duration(duration)
-                txt = TextClip(
+                fallback = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0, 0, 0))
+                fallback = fallback.with_duration(duration) if hasattr(fallback, "with_duration") else fallback.set_duration(duration)
+                txt = safe_create_text_clip(
                     text=scene["narration"],
                     font_size=60,
                     color="white",
                     stroke_color="black",
                     stroke_width=2,
-                    font="DejaVu-Sans",
-                    method="caption",
                     size=(VIDEO_W - 100, None),
-                    text_align="center",
-                ).with_duration(duration).with_position("center")
+                    duration=duration,
+                    position="center"
+                )
                 composite = CompositeVideoClip([fallback, txt], size=(VIDEO_W, VIDEO_H))
-                composite = composite.with_audio(audio)
+                composite = composite.with_audio(audio) if hasattr(composite, "with_audio") else composite.set_audio(audio)
                 scene_clips.append(composite)
                 log(f"  Scene {i} replaced with fallback black screen")
             except Exception as e2:
@@ -512,18 +592,17 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
     if not scene_clips:
         raise RuntimeError("No valid scenes could be assembled.")
 
-    final = scene_clips[0]
-    for clip in scene_clips[1:]:
-        final = concatenate_videoclips([final, clip], method="compose", transition=vfx.crossfadein(0.3))
+    final = concatenate_videoclips(scene_clips, method="compose")
 
     # Background Audio
     bg_path = get_background_audio(topic)
     if bg_path and final.duration > 0:
         try:
             bg = AudioFileClip(str(bg_path))
-            bg = bg.with_effects([vfx.loop(duration=final.duration)])
-            bg = bg.with_volume_scaled(BACKGROUND_AUDIO_VOLUME)
-            final = final.with_audio(CompositeAudioClip([final.audio, bg]))
+            bg = apply_loop(bg, final.duration)
+            bg = apply_volume(bg, BACKGROUND_AUDIO_VOLUME)
+            final_audio = CompositeAudioClip([final.audio, bg])
+            final = final.with_audio(final_audio) if hasattr(final, "with_audio") else final.set_audio(final_audio)
         except Exception as e:
             log(f"  Background mix failed: {e}")
 
@@ -531,10 +610,12 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
     sfx_path = get_punchline_sfx()
     if sfx_path and len(scene_clips) > 0:
         try:
-            sfx = AudioFileClip(str(sfx_path)).subclipped(0, 0.8)
-            sfx = sfx.with_volume_scaled(0.4)
-            sfx = sfx.with_start(final.duration - 0.8)
-            final = final.with_audio(CompositeAudioClip([final.audio, sfx]))
+            sfx = AudioFileClip(str(sfx_path))
+            sfx = sfx.subclipped(0, 0.8) if hasattr(sfx, "subclipped") else sfx.subclip(0, 0.8)
+            sfx = apply_volume(sfx, 0.4)
+            sfx = sfx.with_start(final.duration - 0.8) if hasattr(sfx, "with_start") else sfx.set_start(final.duration - 0.8)
+            final_audio = CompositeAudioClip([final.audio, sfx])
+            final = final.with_audio(final_audio) if hasattr(final, "with_audio") else final.set_audio(final_audio)
         except Exception as e:
             log(f"  SFX overlay failed: {e}")
 
@@ -558,8 +639,9 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
         log(f"  ❌ Rendering failed: {e}")
         try:
             log("  Attempting fallback render with minimal settings...")
-            fallback_video = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0, 0, 0)).with_duration(10)
-            txt = TextClip("Video generation failed", font_size=60, color="white", font="DejaVu-Sans").with_duration(10).with_position("center")
+            fallback_video = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0, 0, 0))
+            fallback_video = fallback_video.with_duration(10) if hasattr(fallback_video, "with_duration") else fallback_video.set_duration(10)
+            txt = safe_create_text_clip("Video generation failed", font_size=60, color="white", duration=10, position="center")
             final_fallback = CompositeVideoClip([fallback_video, txt], size=(VIDEO_W, VIDEO_H))
             final_fallback.write_videofile(str(out_path), fps=1, codec="libx264", audio_codec="aac", verbose=False)
             log(f"  ⚠️ Fallback video created at {out_path}")
