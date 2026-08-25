@@ -1,3 +1,4 @@
+```python
 """
 ==================================================================
 SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v2)
@@ -7,7 +8,7 @@ crossfades, punchline SFX, caching, parallel TTS, and dry-run.
 ==================================================================
 """
 
-print("Script started...")  # DEBUG: see if Python runs
+print("Script started...")  # DEBUG
 
 import os
 import json
@@ -20,7 +21,6 @@ from pathlib import Path
 from datetime import datetime
 
 import requests
-# Assume these exist – if not, install/import locally
 import youtube_upload
 import supabase_client
 
@@ -31,7 +31,7 @@ import supabase_client
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "PASTE_YOUR_KEY_HERE")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "PASTE_YOUR_KEY_HERE")
 
-DRY_RUN = False               # True = skip YouTube upload
+DRY_RUN = False
 
 STATE_FILE = Path("state_spacefacts.json")
 OUTPUT_DIR = Path("output_spacefacts")
@@ -591,10 +591,8 @@ def run_pipeline():
         log(f"❌ Pipeline crashed: {e}")
         import traceback
         traceback.print_exc()
-        raise  # Re-raise to make GitHub Action fail with error code
+        raise
 
 if __name__ == "__main__":
     run_pipeline()
 ```
-
----
