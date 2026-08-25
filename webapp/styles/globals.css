@@ -1,15 +1,15 @@
 @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap");
 
 :root {
-  --bg: #0a0d16;
-  --panel: #11162400;
-  --panel-solid: #131828;
-  --line: #232b40;
-  --text: #e7ecf7;
-  --text-dim: #7d88a3;
-  --amber: #f2b705;
-  --green: #3ddc84;
-  --red: #e5484d;
+  --bg: #F4F2FF;               /* soft lavender white */
+  --panel: #FFFFFF00;          /* transparent panel */
+  --panel-solid: #FFFFFF;      /* white panels (was #131828) */
+  --line: #D9D3FF;             /* lavender border (was #232b40) */
+  --text: #2A1F5C;             /* deep indigo (was #e7ecf7) */
+  --text-dim: #6B5F9E;         /* muted lavender (was #7d88a3) */
+  --amber: #7C6FFF;            /* use lavender as primary accent (was #f2b705) */
+  --green: #5B4DD6;            /* darker lavender for success (was #3ddc84) */
+  --red: #e5484d;              /* keep red for delete */
   --mono: "JetBrains Mono", monospace;
   --sans: "Inter", -apple-system, sans-serif;
 }
