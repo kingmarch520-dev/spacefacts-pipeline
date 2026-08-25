@@ -161,7 +161,7 @@ Topic: {topic}
 def generate_hook_variants(topic: str, count: int = 3) -> list:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-3.6-flash")  # <-- UPDATED
     prompt = f"Write {count} extremely short, scroll-stopping hooks (max 6 words each) for a YouTube Short about: {topic}. Return ONLY a JSON list of strings, no other text."
     response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
     hooks = json.loads(response.text)
@@ -170,7 +170,7 @@ def generate_hook_variants(topic: str, count: int = 3) -> list:
 def fact_check(script_text: str) -> bool:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-3.6-flash")  # <-- UPDATED
     prompt = f"Is the following fact accurate? Reply ONLY 'Yes' or 'No'.\n\n{script_text}"
     response = model.generate_content(prompt)
     return response.text.strip().lower().startswith("yes")
@@ -178,7 +178,7 @@ def fact_check(script_text: str) -> bool:
 def generate_script(topic: str) -> dict:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-3.6-flash")  # <-- UPDATED
 
     log("  Generating hook variants...")
     hooks = generate_hook_variants(topic)
@@ -512,8 +512,7 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
             raise RuntimeError("Output video file is too small or missing.")
     except Exception as e:
         log(f"  ❌ Rendering failed: {e}")
-        # Last-ditch fallback: simple black video
-        try:
+        # Last-ditch fallback: simple black video try:
             log("  Attempting fallback render with minimal settings...")
             fallback_video = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0,0,0), duration=10)
             txt = TextClip("Video generation failed", font_size=60, color="white", font=None, duration=10).with_position("center")
@@ -594,3 +593,4 @@ def run_pipeline():
 
 if __name__ == "__main__":
     run_pipeline()
+        
