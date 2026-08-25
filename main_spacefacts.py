@@ -2,11 +2,12 @@
 ==================================================================
 SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v2)
 ==================================================================
-Now with: retries, fact-checking, dynamic captions, crossfades,
-punchline SFX, caching, parallel TTS, dry-run, and more.
-All 100% free.
+All 100% free. Includes retries, fact-checking, dynamic captions,
+crossfades, punchline SFX, caching, parallel TTS, and dry-run.
 ==================================================================
 """
+
+print("Script started...")  # DEBUG: see if Python runs
 
 import os
 import json
@@ -19,6 +20,7 @@ from pathlib import Path
 from datetime import datetime
 
 import requests
+# Assume these exist – if not, install/import locally
 import youtube_upload
 import supabase_client
 
@@ -29,19 +31,16 @@ import supabase_client
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "PASTE_YOUR_KEY_HERE")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "PASTE_YOUR_KEY_HERE")
 
-# ---------- Mode ----------
-DRY_RUN = False               # True = skip YouTube upload, just generate locally
+DRY_RUN = False               # True = skip YouTube upload
 
-# ---------- Paths ----------
 STATE_FILE = Path("state_spacefacts.json")
 OUTPUT_DIR = Path("output_spacefacts")
-CACHE_DIR = Path("cache_spacefacts")          # for Pexels, Pollinations, SFX
+CACHE_DIR = Path("cache_spacefacts")
 OUTPUT_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(exist_ok=True)
 
 VIDEO_W, VIDEO_H = 1080, 1920
 
-# ---------- TTS ----------
 TTS_VOICES = [
     "en-US-GuyNeural",
     "en-GB-RyanNeural",
@@ -49,7 +48,6 @@ TTS_VOICES = [
     "en-AU-WilliamNeural",
 ]
 
-# ---------- Topics ----------
 TOPIC_POOL = [
     "gravitational time dilation near a black hole",
     "what a neutron star's density actually means",
@@ -77,7 +75,6 @@ TOPIC_POOL = [
     "how massive a blue whale's heart actually is",
 ]
 
-# ---------- Background Audio ----------
 BACKGROUND_AUDIO_ENABLED = True
 BACKGROUND_AUDIO_VOLUME = 0.12
 SPACE_BG_AUDIO_URL = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3"
@@ -85,8 +82,7 @@ OCEAN_BG_AUDIO_URL = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.
 BACKGROUND_CACHE_DIR = CACHE_DIR / "bg"
 BACKGROUND_CACHE_DIR.mkdir(exist_ok=True)
 
-# ---------- Punchline SFX (free from Pixabay) ----------
-PUNCHLINE_SFX_URL = "https://cdn.pixabay.com/download/audio/2022/03/10/audio_c8c8a7b9c1.mp3"  # short drum hit
+PUNCHLINE_SFX_URL = "https://cdn.pixabay.com/download/audio/2022/03/10/audio_c8c8a7b9c1.mp3"
 SFX_CACHE_DIR = CACHE_DIR / "sfx"
 SFX_CACHE_DIR.mkdir(exist_ok=True)
 
@@ -134,43 +130,35 @@ def save_cache_file(cache_subdir: Path, key: str, ext: str, content: bytes) -> P
     return p
 
 # ------------------------------------------------------------------
-# 1. SCRIPT GENERATION (with retries + fact-check + hook optimization)
+# 1. SCRIPT GENERATION
 # ------------------------------------------------------------------
 
 SCRIPT_SYSTEM_PROMPT = """You are writing a 30-45 second YouTube Shorts script
 about a space/physics fact OR a sea/ocean fact.
 
-Rules for how it should sound:
-- Write like you're explaining something wild to a friend, not narrating a documentary.
-- Use contractions (it's, you'd, that's, don't).
-- Vary sentence length: mix short punchy lines with one longer explanatory line.
-- Do NOT use rhetorical filler like "this isn't science fiction, it's reality".
-- Do NOT stack intensifiers (incredibly, absolutely, insanely). Pick ONE strong word max.
-- Include exactly one moment of genuine surprise or disbelief, phrased like a reaction.
-- Deliver the core fact clearly before the final scene. No summary, no moral.
-- The FINAL scene must be a short joke or pun directly related to the fact — one line, genuinely funny.
+Rules:
+- Use contractions, vary sentence length.
+- No rhetorical filler or stacked intensifiers.
+- Include one moment of genuine surprise.
+- Deliver the core fact clearly before the final scene.
+- The FINAL scene must be a short joke or pun.
 
 Break the script into scenes. Each scene is one or two sentences.
 For each scene, provide:
-- visual_type: "literal" (real stock footage) or "abstract" (concept, no real footage)
-- visual_query: for "literal", a 3-6 word stock footage search term.
-  For "abstract", a descriptive AI image generation prompt (be specific, cinematic, include style/lighting).
-- For the final joke scene, pick a literal visual that supports the punchline.
+- visual_type: "literal" or "abstract"
+- visual_query: search term (literal) or AI image prompt (abstract, be cinematic)
 
-Return ONLY valid JSON, no markdown, in this shape:
+Return ONLY valid JSON:
 {
-  "title": "short punchy YouTube title, under 60 characters",
-  "hook": "the first scene's narration — must stop the scroll in 2-3 seconds",
-  "scenes": [
-    { "narration": "...", "visual_type": "literal", "visual_query": "..." }
-  ],
+  "title": "...",
+  "hook": "...",
+  "scenes": [ {"narration": "...", "visual_type": "...", "visual_query": "..."} ],
   "hashtags": ["#shorts", "#space", "#facts"]
 }
 
 Topic: {topic}
 """
 
-# ---- Hook optimizer ----
 def generate_hook_variants(topic: str, count: int = 3) -> list:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
@@ -178,7 +166,7 @@ def generate_hook_variants(topic: str, count: int = 3) -> list:
     prompt = f"Write {count} extremely short, scroll-stopping hooks (max 6 words each) for a YouTube Short about: {topic}. Return ONLY a JSON list of strings, no other text."
     response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
     hooks = json.loads(response.text)
-    return sorted(hooks, key=len)  # shortest first
+    return sorted(hooks, key=len)
 
 def fact_check(script_text: str) -> bool:
     import google.generativeai as genai
@@ -193,13 +181,11 @@ def generate_script(topic: str) -> dict:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel("gemini-2.0-flash")
 
-    # 1. Pick the shortest hook
     log("  Generating hook variants...")
     hooks = generate_hook_variants(topic)
     best_hook = hooks[0]
     log(f"  Best hook: '{best_hook}'")
 
-    # 2. Generate the full script with retries
     for attempt in range(4):
         try:
             prompt = SCRIPT_SYSTEM_PROMPT.replace("{topic}", topic)
@@ -208,17 +194,14 @@ def generate_script(topic: str) -> dict:
                 generation_config={"response_mime_type": "application/json"},
             )
             data = json.loads(response.text)
-            # Replace hook with our optimized one
             data["hook"] = best_hook
             data["scenes"][0]["narration"] = best_hook + " " + data["scenes"][0]["narration"].split(".", 1)[-1].strip()
 
-            # 3. Fact-check
             full_text = " ".join([s["narration"] for s in data["scenes"]])
             if not fact_check(full_text):
                 log("  ⚠️ Fact-check failed, regenerating...")
                 continue
 
-            # Basic validation
             assert "scenes" in data and len(data["scenes"]) > 0
             for scene in data["scenes"]:
                 assert scene["visual_type"] in ("literal", "abstract")
@@ -231,7 +214,7 @@ def generate_script(topic: str) -> dict:
     raise RuntimeError("Failed to generate a valid script after retries.")
 
 # ------------------------------------------------------------------
-# 2. NARRATION (Edge TTS) — parallel
+# 2. NARRATION (parallel Edge TTS)
 # ------------------------------------------------------------------
 
 async def _synthesize_one(text: str, voice: str, out_path: Path):
@@ -251,7 +234,6 @@ def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
     from moviepy import AudioFileClip
     voice = random.choice(TTS_VOICES)
     log(f"  TTS voice: {voice}")
-    # Run async parallel generation
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     paths = loop.run_until_complete(_synthesize_all(scenes, run_dir, voice))
@@ -264,12 +246,10 @@ def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
     return results
 
 # ------------------------------------------------------------------
-# 3. VISUALS — with expanded query fallback + caching + cinematic prompts
+# 3. VISUALS (cached, with expanded queries)
 # ------------------------------------------------------------------
 
 def expand_visual_query(original: str) -> list:
-    """Generate 2-3 search variations."""
-    # Quick synonyms for common space/ocean terms
     swaps = {
         "galaxy": ["star cluster", "milky way", "cosmic"],
         "star": ["sun", "celestial", "stellar"],
@@ -285,10 +265,9 @@ def expand_visual_query(original: str) -> list:
                 new_words = words.copy()
                 new_words[i] = syn
                 variations.append(" ".join(new_words))
-    return list(dict.fromkeys(variations))[:3]  # unique, max 3
+    return list(dict.fromkeys(variations))[:3]
 
 def fetch_pexels_video_with_fallback(query: str, out_path: Path) -> Path | None:
-    """Try original query, then expanded synonyms."""
     variations = expand_visual_query(query)
     for q in variations:
         log(f"    Trying Pexels: '{q}'")
@@ -304,7 +283,7 @@ def fetch_pexels_video_with_fallback(query: str, out_path: Path) -> Path | None:
                 files = sorted(video["video_files"], key=lambda f: f.get("width", 0))
                 chosen = next((f for f in files if f.get("width", 0) >= 720), files[-1])
                 video_data = requests.get(chosen["link"], timeout=30).content
-                if len(video_data) > 1000:  # sanity check
+                if len(video_data) > 1000:
                     out_path.write_bytes(video_data)
                     return out_path
         except Exception:
@@ -312,13 +291,9 @@ def fetch_pexels_video_with_fallback(query: str, out_path: Path) -> Path | None:
     return None
 
 def get_cached_visual(scene: dict, index: int, run_dir: Path) -> dict:
-    """Return {'type': 'video'|'image', 'path': Path}.
-       Uses caching by query hash.
-    """
     q = scene["visual_query"]
     key = cache_key(q)
 
-    # If literal, try cache first
     if scene["visual_type"] == "literal":
         cache_path = get_cached_file(CACHE_DIR / "pexels", key, "mp4")
         if cache_path:
@@ -327,15 +302,11 @@ def get_cached_visual(scene: dict, index: int, run_dir: Path) -> dict:
         out_path = run_dir / f"visual_{index}.mp4"
         result = fetch_pexels_video_with_fallback(q, out_path)
         if result:
-            # save to global cache
             cached = save_cache_file(CACHE_DIR / "pexels", key, "mp4", result.read_bytes())
             return {"type": "video", "path": cached}
 
-        # fall through to Pollinations
         log(f"    Pexels failed, falling back to Pollinations for: {q}")
 
-    # Abstract OR fallback from literal:
-    # Enhance prompt for Pollinations (cinematic)
     enhanced_prompt = f"{q}, cinematic, dramatic lighting, photorealistic, 8k, highly detailed"
     key = cache_key(enhanced_prompt)
     cache_path = get_cached_file(CACHE_DIR / "pollinations", key, "jpg")
@@ -354,7 +325,7 @@ def get_cached_visual(scene: dict, index: int, run_dir: Path) -> dict:
     except Exception as e:
         log(f"    Pollinations error: {e}")
 
-    # Ultimate fallback: a static black image with text
+    # Ultimate fallback: black screen
     from moviepy import ColorClip
     fallback_path = run_dir / f"visual_{index}_fallback.jpg"
     clip = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0,0,0), duration=1)
@@ -362,7 +333,7 @@ def get_cached_visual(scene: dict, index: int, run_dir: Path) -> dict:
     return {"type": "image", "path": fallback_path}
 
 # ------------------------------------------------------------------
-# 4. BACKGROUND AUDIO + SFX (cached)
+# 4. BACKGROUND & SFX
 # ------------------------------------------------------------------
 
 def get_background_audio(topic: str) -> Path | None:
@@ -399,11 +370,10 @@ def get_punchline_sfx() -> Path | None:
         return None
 
 # ------------------------------------------------------------------
-# 5. ASSEMBLY — crossfades, dynamic captions (chunked), SFX overlay
+# 5. CHUNK TEXT for dynamic captions
 # ------------------------------------------------------------------
 
 def chunk_text(text: str) -> list:
-    """Split into chunks by punctuation, keep delimiters."""
     import re
     parts = re.split(r'([.!?])', text)
     chunks = []
@@ -415,6 +385,10 @@ def chunk_text(text: str) -> list:
         chunks.append(parts[-1].strip())
     return chunks if chunks else [text]
 
+# ------------------------------------------------------------------
+# 6. ASSEMBLY (robust with fallbacks)
+# ------------------------------------------------------------------
+
 def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, topic: str) -> Path:
     from moviepy import (
         AudioFileClip, ImageClip, VideoFileClip, CompositeVideoClip,
@@ -422,58 +396,84 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
     )
 
     scene_clips = []
-
     for i, scene in enumerate(script["scenes"]):
-        audio_path = audio_clips[i]["path"]
-        audio = AudioFileClip(str(audio_path))
-        duration = audio.duration
-        visual = visuals[i]
+        try:
+            audio_path = audio_clips[i]["path"]
+            audio = AudioFileClip(str(audio_path))
+            duration = audio.duration
+            if duration <= 0:
+                log(f"  Scene {i} has zero duration, skipping")
+                continue
 
-        # ---- Load visual ----
-        if visual["type"] == "video":
-            clip = VideoFileClip(str(visual["path"])).without_audio()
-            if clip.duration < duration:
-                clip = clip.with_effects([vfx.Loop(duration=duration)])
+            visual = visuals[i]
+            if visual["type"] == "video":
+                clip = VideoFileClip(str(visual["path"])).without_audio()
+                if clip.duration < duration:
+                    clip = clip.with_effects([vfx.Loop(duration=duration)])
+                else:
+                    clip = clip.subclipped(0, duration)
             else:
-                clip = clip.subclipped(0, duration)
-        else:
-            clip = ImageClip(str(visual["path"])).with_duration(duration)
+                clip = ImageClip(str(visual["path"])).with_duration(duration)
 
-        clip = clip.with_effects([vfx.Resize(height=VIDEO_H)]).with_position("center")
+            clip = clip.with_effects([vfx.Resize(height=VIDEO_H)]).with_position("center")
 
-        # ---- Dynamic chunked captions ----
-        chunks = chunk_text(scene["narration"])
-        chunk_duration = duration / len(chunks)
-        caption_clips = []
-        for j, chunk in enumerate(chunks):
-            start = j * chunk_duration
-            txt = TextClip(
-                text=chunk,
-                font_size=56,
-                color="white",
-                stroke_color="black",
-                stroke_width=2,
-                font="Arial",
-                method="caption",
-                size=(VIDEO_W - 100, None),
-                text_align="center",
-            ).with_duration(chunk_duration).with_start(start).with_position(("center", "center"))
+            # Captions
+            chunks = chunk_text(scene["narration"])
+            chunk_duration = duration / len(chunks) if chunks else duration
+            caption_clips = []
+            for j, chunk in enumerate(chunks):
+                start = j * chunk_duration
+                txt = TextClip(
+                    text=chunk,
+                    font_size=56,
+                    color="white",
+                    stroke_color="black",
+                    stroke_width=2,
+                    font=None,  # fallback default
+                    method="caption",
+                    size=(VIDEO_W - 100, None),
+                    text_align="center",
+                ).with_duration(chunk_duration).with_start(start).with_position(("center", "center"))
 
-            # Add a subtle scale pulse at start
-            txt = txt.with_effects([vfx.Resize(lambda t: 1 + 0.05 * (1 - t / chunk_duration))])
-            caption_clips.append(txt)
+                txt = txt.with_effects([vfx.Resize(lambda t: 1 + 0.05 * (1 - t / max(chunk_duration, 0.01)))])
+                caption_clips.append(txt)
 
-        # ---- Combine visual + captions ----
-        composite = CompositeVideoClip([clip] + caption_clips, size=(VIDEO_W, VIDEO_H))
-        composite = composite.with_audio(audio)
-        scene_clips.append(composite)
+            composite = CompositeVideoClip([clip] + caption_clips, size=(VIDEO_W, VIDEO_H))
+            composite = composite.with_audio(audio)
+            scene_clips.append(composite)
+            log(f"  Scene {i} composed successfully")
 
-    # ---- Crossfade transitions ----
+        except Exception as e:
+            log(f"  ❌ Scene {i} failed: {e}")
+            # Fallback: black screen with text
+            try:
+                fallback = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0,0,0), duration=duration)
+                txt = TextClip(
+                    text=scene["narration"],
+                    font_size=60,
+                    color="white",
+                    stroke_color="black",
+                    stroke_width=2,
+                    font=None,
+                    method="caption",
+                    size=(VIDEO_W-100, None),
+                    text_align="center",
+                ).with_duration(duration).with_position("center")
+                composite = CompositeVideoClip([fallback, txt], size=(VIDEO_W, VIDEO_H))
+                composite = composite.with_audio(audio)
+                scene_clips.append(composite)
+                log(f"  Scene {i} replaced with fallback black screen")
+            except Exception as e2:
+                log(f"  ❌ Fallback also failed: {e2}")
+
+    if not scene_clips:
+        raise RuntimeError("No valid scenes could be assembled.")
+
     final = scene_clips[0]
     for clip in scene_clips[1:]:
         final = concatenate_videoclips([final, clip], method="compose", transition=vfx.CrossFadeIn(0.3))
 
-    # ---- Background audio ----
+    # Background
     bg_path = get_background_audio(topic)
     if bg_path and final.duration > 0:
         try:
@@ -484,15 +484,117 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path, t
         except Exception as e:
             log(f"  Background mix failed: {e}")
 
-    # ---- Punchline SFX on the last scene ----
+    # SFX
     sfx_path = get_punchline_sfx()
     if sfx_path and len(scene_clips) > 0:
         try:
-            # Overlay on last 0.8s of the final scene
             sfx = AudioFileClip(str(sfx_path)).subclipped(0, 0.8)
             sfx = sfx.with_volume(0.4)
-            # Position at the end of the video
             sfx = sfx.with_start(final.duration - 0.8)
             final = final.with_audio(CompositeAudioClip([final.audio, sfx]))
         except Exception as e:
             log(f"  SFX overlay failed: {e}")
+
+    out_path = run_dir / "final_video.mp4"
+    log("  Rendering final video...")
+    try:
+        final.write_videofile(
+            str(out_path),
+            fps=30,
+            codec="libx264",
+            audio_codec="aac",
+            verbose=False,
+            logger=None,
+            threads=2,
+        )
+        if out_path.exists() and out_path.stat().st_size > 1000:
+            log(f"  ✅ Video rendered: {out_path} ({out_path.stat().st_size/1e6:.2f} MB)")
+        else:
+            raise RuntimeError("Output video file is too small or missing.")
+    except Exception as e:
+        log(f"  ❌ Rendering failed: {e}")
+        # Last-ditch fallback: simple black video
+        try:
+            log("  Attempting fallback render with minimal settings...")
+            fallback_video = ColorClip(size=(VIDEO_W, VIDEO_H), color=(0,0,0), duration=10)
+            txt = TextClip("Video generation failed", font_size=60, color="white", font=None, duration=10).with_position("center")
+            final_fallback = CompositeVideoClip([fallback_video, txt], size=(VIDEO_W, VIDEO_H))
+            final_fallback.write_videofile(str(out_path), fps=1, codec="libx264", audio_codec="aac", verbose=False)
+            log(f"  ⚠️ Fallback video created at {out_path}")
+        except Exception as e2:
+            log(f"  ❌ Fallback also failed: {e2}")
+            raise
+
+    return out_path
+
+# ------------------------------------------------------------------
+# 7. MAIN PIPELINE
+# ------------------------------------------------------------------
+
+def run_pipeline():
+    try:
+        topic = get_next_topic()
+        log(f"Topic: {topic}")
+
+        log("Generating script...")
+        script = generate_script(topic)
+        log(f"Title: {script['title']}")
+
+        run_dir = OUTPUT_DIR / script["title"].replace(" ", "_")[:40]
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "script.json").write_text(json.dumps(script, indent=2))
+
+        log("Synthesizing narration...")
+        audio_clips = synthesize_scene_audio(script["scenes"], run_dir)
+
+        log("Fetching visuals...")
+        visuals = []
+        for i, scene in enumerate(script["scenes"]):
+            log(f"  Scene {i+1}: '{scene['visual_query']}'")
+            visuals.append(get_cached_visual(scene, i, run_dir))
+
+        log("Assembling video...")
+        final_path = build_video(script, audio_clips, visuals, run_dir, topic)
+
+        if DRY_RUN:
+            log("DRY RUN: Skipping upload.")
+            print(f"\n✅ Done: {final_path}")
+            return
+
+        log("Uploading to YouTube...")
+        description = f"{script.get('hook', '')}\n\n{' '.join(script['hashtags'])}"
+        upload_result = youtube_upload.upload_video(
+            file_path=str(final_path),
+            title=script["title"],
+            description=description,
+            tags=[h.replace("#", "") for h in script["hashtags"]],
+            privacy_status="unlisted",
+        )
+        video_id = upload_result["id"]
+        thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+        supabase_client.log_video(
+            youtube_id=video_id,
+            title=script["title"],
+            description=description,
+            hashtags=script["hashtags"],
+            thumbnail_url=thumbnail_url,
+            topic=topic,
+            status="unlisted",
+        )
+
+        print(f"\n🎬 Done: {final_path}")
+        print(f"📺 YouTube (unlisted): https://youtu.be/{video_id}")
+        print("Review and publish from the dashboard.")
+
+    except Exception as e:
+        log(f"❌ Pipeline crashed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise  # Re-raise to make GitHub Action fail with error code
+
+if __name__ == "__main__":
+    run_pipeline()
+```
+
+---
