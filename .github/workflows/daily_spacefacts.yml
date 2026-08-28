@@ -1,11 +1,10 @@
-name: Daily Space Facts Pipeline
+name: Space Facts Automated Pipeline
 
 on:
   schedule:
-    # Runs once a day at 14:00 UTC — adjust to whenever you want
-    # new content ready (e.g. before your peak posting window).
-    - cron: "0 14 * * *"
-  workflow_dispatch: {}  # lets you trigger it manually from GitHub mobile too
+    # Runs every 5 hours (00:00, 05:00, 10:00, 15:00, 20:00 UTC)
+    - cron: "0 */5 * * *"
+  workflow_dispatch: {}  # Manual trigger option
 
 jobs:
   generate-and-upload:
@@ -21,8 +20,9 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies (moviepy needs ffmpeg)
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install system dependencies & fonts
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
 
       - name: Install Python dependencies
         run: |
@@ -44,5 +44,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add state_spacefacts.json
-          git diff --staged --quiet || git commit -m "Update state after daily run"
+          git diff --staged --quiet || git commit -m "Update state after run [skip ci]"
           git push
