@@ -73,9 +73,10 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 VIDEO_W, VIDEO_H = 1080, 1920  # vertical shorts
 
-# moviepy 2.x TextClip has no built-in font fallback — point this at
-# a real .ttf/.otf on disk (upload one to Colab, or use a system font).
-CAPTION_FONT_PATH = "/content/fonts/YourFont.ttf"  # <-- SET THIS
+# moviepy 2.x TextClip has no built-in font fallback — this points at
+# a font file committed to the repo root (same folder as this script),
+# so it resolves the same way locally, in Colab, or in GitHub Actions.
+CAPTION_FONT_PATH = str(Path(__file__).parent / "Anton-Regular.ttf")
 
 # Rotate between a small, consistent set of Edge TTS voices.
 TTS_VOICES = [
@@ -443,8 +444,8 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -
     if not Path(CAPTION_FONT_PATH).exists():
         raise FileNotFoundError(
             f"CAPTION_FONT_PATH does not exist: {CAPTION_FONT_PATH}. "
-            "moviepy 2.x has no default font fallback — upload a .ttf/.otf "
-            "and update CAPTION_FONT_PATH at the top of this file."
+            "Make sure Anton-Regular.ttf (or your chosen font) is committed "
+            "to the repo root, next to main_spacefacts.py."
         )
 
     scene_clips = []
