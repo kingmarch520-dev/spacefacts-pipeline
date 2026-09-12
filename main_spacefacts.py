@@ -5,16 +5,48 @@ SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE
 Built for Google Colab. Run cells top to bottom, or paste into
 one cell and execute.
 
-WHAT THIS DOES DIFFERENTLY (UPGRADED VERSION):
-1. Script generates 6-10 short scenes (under 8 words each) for fast retention.
-2. Implements a "Seamless Loop Hook" instead of a joke ending.
-3. Edge TTS voice speed is boosted (+12%) for fast-paced shorts delivery.
-4. Adds dynamic "Ken Burns" slow-zoom effects to static AI images.
-5. AI Image prompts automatically appended with cinematic/high-quality tags.
-6. Automatically mixes low-volume background music (BGM) if available.
+VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
+1. Ending style now alternates between two retention strategies
+   instead of always ending on a joke:
+     - "loop"  -> final scene loops back into the hook (higher
+                  average view duration, more rewatches)
+     - "joke"  -> punchline ending (higher comment/share rate)
+   Both get logged to Supabase per video so you can compare real
+   view/retention numbers between the two once you have a few
+   weeks of data, instead of guessing which style wins.
+2. Hook writing is no longer left vague. The prompt now gives
+   Gemini 5 concrete hook patterns, led by "compare the extreme to
+   something ordinary" — the pattern your actual best-performing
+   video ("We Built Something Colder Than Deep Space", 1.7k views)
+   used. Titles are steered toward plain/dry phrasing over dramatic
+   adjectives, based on your own A/B evidence: "Why Space is
+   Completely Silent" (971 views) beat "Why Space Is Terrifyingly
+   Silent" (876 views) on the identical topic.
+3. Topic selection is no longer strict round-robin. It's weighted
+   toward whichever category (space vs ocean) is performing better.
+   Seeded from your real 28-day YouTube Studio numbers (space
+   ~1,158 avg views, ocean ~1,035 avg — a real but modest ~12% lean,
+   not a hard cutoff) until Supabase has enough logged view data of
+   its own to take over the weighting live. Use
+   log_manual_performance() to feed in numbers you read off YouTube
+   Studio if you don't have API sync set up.
+4. Model stays on gemini-3.6-flash (current, correct, GA as of
+   July 2026) — do not swap this back to gemini-1.5-flash or any
+   1.x model, those are permanently shut down.
+5. Pollinations image fetch now checks content-type before saving,
+   so a rate-limit/error response can't silently masquerade as a
+   valid image and blow up later in moviepy.
+6. TextClip now requires an explicit font path (moviepy 2.x has no
+   default font fallback) — set CAPTION_FONT_PATH below or captions
+   will crash the build step.
 
 REQUIRED INSTALLS (run first in Colab):
     !pip install google-generativeai edge-tts moviepy pillow requests --quiet
+
+REQUIRED API KEYS (set as Colab secrets or env vars):
+    GEMINI_API_KEY   -> https://aistudio.google.com/apikey (free)
+    PEXELS_API_KEY   -> https://www.pexels.com/api/ (free)
+    Pollinations needs NO KEY — it's a plain GET request.
 ==================================================================
 """
 
@@ -39,11 +71,11 @@ STATE_FILE = Path("state_spacefacts.json")
 OUTPUT_DIR = Path("output_spacefacts")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Create BGM directory. Drop ambient .mp3 tracks in here!
-BGM_DIR = Path("bgm")
-BGM_DIR.mkdir(exist_ok=True) 
-
 VIDEO_W, VIDEO_H = 1080, 1920  # vertical shorts
+
+# moviepy 2.x TextClip has no built-in font fallback — point this at
+# a real .ttf/.otf on disk (upload one to Colab, or use a system font).
+CAPTION_FONT_PATH = "/content/fonts/YourFont.ttf"  # <-- SET THIS
 
 # Rotate between a small, consistent set of Edge TTS voices.
 TTS_VOICES = [
@@ -53,43 +85,57 @@ TTS_VOICES = [
     "en-AU-WilliamNeural",   # relaxed Australian male
 ]
 
-# EXPANDED TOPIC POOL (Optimized for extreme scale, danger, and mystery)
+# Seeded from your actual YouTube Studio "Top content" numbers
+# (28-day window, 15 Aug - 11 Sept 2026):
+#   space average ~1,158 views (absolute zero 1.7k, galaxies 1.2k,
+#     supernova 1.1k, wormhole 1.1k, silence x2 971/876)
+#   ocean average ~1,035 views (blue whale 1.3k, clam x2 1.0k/946,
+#     giant squid 895)
+# Space is ahead by ~12% — real but not dramatic, so this is a lean,
+# not a hard cutoff. Used only when Supabase has no performance data
+# logged yet; once get_video_performance() below returns real rows,
+# these are ignored in favor of live numbers.
+FALLBACK_CATEGORY_WEIGHTS = {"space": 0.55, "ocean": 0.45}
+
+# Manually logged view counts, for when you don't have YouTube Data
+# API sync wired up yet. Update this after checking YouTube Studio
+# every so often — log_manual_performance() folds these into Supabase
+# so the weighting stays current without needing API access.
+MANUAL_PERFORMANCE_LOG = [
+    # {"title": "...", "category": "space", "views": 1700},
+]
+
+# Two lanes: space/physics and sea/ocean. Each topic is tagged with
+# a "category" so performance can be tracked and weighted per lane.
 TOPIC_POOL = [
-    # space / physics
-    "what actually happens if a massive solar flare hits Earth today",
-    "the horrifying distance between Earth and the nearest black hole",
-    "why rogue planets drifting in pitch dark space are so dangerous",
-    "how long a human could survive on the surface of Venus",
-    "gravitational time dilation near a black hole",
-    "what a neutron star's density actually means",
-    "why the observable universe has an edge",
-    "spaghettification near a black hole's event horizon",
-    "how fast the Milky Way is actually moving",
-    "what would happen if you fell into a wormhole",
-    "why space is completely silent",
-    "how close we've actually gotten to absolute zero",
-    "the size of the largest known star compared to the sun",
-    "why time moves slower for astronauts on the ISS",
-    "what dark matter actually does to galaxies",
-    "how a supernova could theoretically threaten Earth",
-    # sea / ocean / earth
-    "what scientists found inside the deepest hole ever drilled on Earth",
-    "how little of the ocean floor has actually been mapped",
-    "the crushing pressure at the bottom of the Mariana Trench",
-    "why the deep ocean is in permanent total darkness",
-    "how much of Earth's oxygen actually comes from the ocean",
-    "what lives in hydrothermal vents with no sunlight at all",
-    "how big the largest recorded giant squid actually was",
-    "why most of the ocean is still completely unexplored",
-    "how deep sunlight actually stops reaching underwater",
-    "what happens to a human body at extreme ocean depth",
-    "how old the oldest living sea creature actually is",
-    "why bioluminescence exists in deep sea animals",
-    "how massive a blue whale's heart actually is",
+    {"topic": "gravitational time dilation near a black hole", "category": "space"},
+    {"topic": "what a neutron star's density actually means", "category": "space"},
+    {"topic": "why the observable universe has an edge", "category": "space"},
+    {"topic": "spaghettification near a black hole's event horizon", "category": "space"},
+    {"topic": "how fast the Milky Way is actually moving", "category": "space"},
+    {"topic": "what would happen if you fell into a wormhole", "category": "space"},
+    {"topic": "why space is completely silent", "category": "space"},
+    {"topic": "how close we've actually gotten to absolute zero", "category": "space"},
+    {"topic": "the size of the largest known star compared to the sun", "category": "space"},
+    {"topic": "why time moves slower for astronauts on the ISS", "category": "space"},
+    {"topic": "what dark matter actually does to galaxies", "category": "space"},
+    {"topic": "how a supernova could theoretically threaten Earth", "category": "space"},
+    {"topic": "how little of the ocean floor has actually been mapped", "category": "ocean"},
+    {"topic": "the crushing pressure at the bottom of the Mariana Trench", "category": "ocean"},
+    {"topic": "why the deep ocean is in permanent total darkness", "category": "ocean"},
+    {"topic": "how much of Earth's oxygen actually comes from the ocean", "category": "ocean"},
+    {"topic": "what lives in hydrothermal vents with no sunlight at all", "category": "ocean"},
+    {"topic": "how big the largest recorded giant squid actually was", "category": "ocean"},
+    {"topic": "why most of the ocean is still completely unexplored", "category": "ocean"},
+    {"topic": "how deep sunlight actually stops reaching underwater", "category": "ocean"},
+    {"topic": "what happens to a human body at extreme ocean depth", "category": "ocean"},
+    {"topic": "how old the oldest living sea creature actually is", "category": "ocean"},
+    {"topic": "why bioluminescence exists in deep sea animals", "category": "ocean"},
+    {"topic": "how massive a blue whale's heart actually is", "category": "ocean"},
 ]
 
 # ------------------------------------------------------------------
-# STATE HANDLING 
+# STATE HANDLING
 # ------------------------------------------------------------------
 
 def load_state():
@@ -100,63 +146,195 @@ def load_state():
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
+def get_category_weights():
+    """
+    Asks Supabase for average views per category among videos logged
+    so far. Returns {"space": weight, "ocean": weight} normalized to
+    sum to 1.0. Falls back to equal weights (0.5/0.5) if there's no
+    data yet, or if the query fails for any reason (e.g. you haven't
+    wired up a `views` column / sync job yet).
+
+    NOTE: this assumes supabase_client exposes a helper that returns
+    rows like [{"topic": "...", "category": "space", "views": 1234}, ...].
+    Adjust `supabase_client.get_video_performance()` to match your
+    actual table/column names if they differ.
+    """
+    try:
+        rows = supabase_client.get_video_performance()
+        if not rows:
+            raise ValueError("no performance data yet")
+
+        totals = {"space": 0, "ocean": 0}
+        counts = {"space": 0, "ocean": 0}
+        for row in rows:
+            cat = row.get("category")
+            views = row.get("views")
+            if cat in totals and isinstance(views, (int, float)):
+                totals[cat] += views
+                counts[cat] += 1
+
+        avgs = {
+            cat: (totals[cat] / counts[cat] if counts[cat] > 0 else 0)
+            for cat in totals
+        }
+        total_avg = sum(avgs.values())
+        if total_avg <= 0:
+            raise ValueError("no usable view data yet")
+
+        return {cat: avgs[cat] / total_avg for cat in avgs}
+    except Exception as e:
+        print(f"      (topic weighting fallback to seeded 55/45 — {e})")
+        return dict(FALLBACK_CATEGORY_WEIGHTS)
+
+def log_manual_performance():
+    """
+    Run this by hand whenever you've checked YouTube Studio and want
+    to fold updated view counts into the weighting, without needing
+    YouTube Data API access. Fill in MANUAL_PERFORMANCE_LOG above,
+    then call this once. Requires supabase_client to expose an
+    upsert-style helper — adjust to match your actual client.
+    """
+    if not MANUAL_PERFORMANCE_LOG:
+        print("MANUAL_PERFORMANCE_LOG is empty — nothing to log.")
+        return
+    for entry in MANUAL_PERFORMANCE_LOG:
+        supabase_client.upsert_video_performance(
+            title=entry["title"],
+            category=entry["category"],
+            views=entry["views"],
+        )
+    print(f"Logged {len(MANUAL_PERFORMANCE_LOG)} manual performance entries.")
+
 def get_next_topic():
+    """
+    Picks the next topic. Cycles sequentially through whichever
+    category wins the current weighting, so you still work through
+    the full pool over time instead of hammering one topic — you're
+    just visiting the winning lane's topics more often on average.
+    """
     state = load_state()
-    idx = state["index"] % len(TOPIC_POOL)
-    topic = TOPIC_POOL[idx]
+    idx = state["index"]
+
+    weights = get_category_weights()
+    chosen_category = random.choices(
+        population=list(weights.keys()),
+        weights=list(weights.values()),
+        k=1,
+    )[0]
+
+    category_topics = [t for t in TOPIC_POOL if t["category"] == chosen_category]
+    topic_entry = category_topics[idx % len(category_topics)]
+
     state["index"] = idx + 1
     save_state(state)
-    return topic
+    return topic_entry
 
 # ------------------------------------------------------------------
-# 1. SCRIPT GENERATION (Gemini) — Scene-segmented, Loop Hooks
+# 1. SCRIPT GENERATION (Gemini) — scene-segmented, hook-engineered
 # ------------------------------------------------------------------
 
 SCRIPT_SYSTEM_PROMPT = """You are writing a 30-45 second YouTube Shorts script
 about a space/physics fact OR a sea/ocean fact.
 
+ENDING STYLE FOR THIS SCRIPT: {ending_style}
+
 Rules for how it should sound:
-- Write like you're explaining something wild to a friend, not narrating a documentary.
+- Write like you're explaining something wild to a friend, not narrating
+  a documentary.
 - Use contractions (it's, you'd, that's, don't).
-- Do NOT use rhetorical filler like "this isn't science fiction, it's reality."
-- Do NOT stack intensifiers (incredibly, absolutely, insanely). Pick ONE strong word max per sentence.
-- Keep each scene's narration SHORT — ideally under 8 words. 
-- Create exactly 6 to 10 scenes per video so visuals and text change rapidly every 1.5–2.5 seconds.
-- DO NOT end with a joke, pun, summary, or closing statement.
-- The FINAL scene MUST end mid-thought or lead seamlessly into the very first word of the script/title so that the video loops endlessly.
-  Example Loop: 
-  First Scene: "...is why you can never touch a black hole."
-  Final Scene: "And that terrifying reality..." -> (Loops back to First)
+- Vary sentence length: mix short punchy lines with one longer
+  explanatory line.
+- Do NOT use rhetorical filler like "this isn't science fiction, it's
+  reality" or "prepare to have your mind blown."
+- Do NOT stack intensifiers (incredibly, absolutely, insanely). Pick
+  ONE strong word max per sentence, and only when it's earned.
+- Include exactly one moment of genuine surprise or disbelief, phrased
+  like a reaction, not a lecture.
+- Deliver the core fact clearly before the final scene.
 
-For each scene, provide a visual:
-- visual_type: "literal" (real stock footage exists, e.g. a dam, the ISS, a person walking)
-- visual_type: "abstract" (concept with no real footage, e.g. time dilation, event horizon)
-- visual_query: for "literal", a 3-6 word stock footage search term. For "abstract", a descriptive AI image generation prompt.
+HOOK (the very first scene's narration) — use ONE of these patterns,
+whichever fits the topic best. The hook must work in 2-3 seconds:
+  1. Compare the extreme to something ordinary the viewer already has
+     a mental reference for. This is the strongest pattern of the
+     five — it's what the channel's best-performing video used:
+     e.g. "We built something colder than deep space."
+  2. Lead with a specific number or stat before any setup:
+     e.g. "One teaspoon of this would weigh six billion tons."
+  3. Direct address framed as a personal stake:
+     e.g. "You wouldn't even last one second down there."
+  4. False premise, immediate correction:
+     e.g. "Everyone thinks space is empty. It's not even close."
+  5. Blunt, ominous fact fragment, no lead-in at all:
+     e.g. "This star could swallow our entire solar system."
+Prefer pattern 1 when a genuinely apt comparison exists for the topic.
+Do NOT use generic hook filler like "did you know" or "here's a fact
+that will blow your mind."
 
-Return ONLY valid JSON, no markdown fences, no commentary, in this exact shape:
+ENDING — follow whichever style is set above:
+- If ending_style is "loop": the FINAL scene must end mid-thought or
+  lead seamlessly into the very first word of the hook, so the video
+  loops endlessly with no visible seam. No joke, no summary, no moral.
+  Example: hook is "...is why you can never touch a black hole." ->
+  final scene is "And that terrifying reality..." (loops back to hook).
+- If ending_style is "joke": the FINAL scene must be a short joke or
+  pun directly related to the fact — one line, genuinely funny, not a
+  generic "dad joke for the sake of it." It should feel like a natural
+  button on the video, the kind of line that gets a laugh-comment. If
+  a clean pun exists in the topic (wordplay on the animal, phenomenon,
+  or scientific term), prefer that over a generic joke.
 
-{
+TITLE — use a curiosity-gap framing, not a flat description:
+  Weak:  "Facts About Deep Ocean Darkness"
+  Strong: "The Ocean Depth Where Light Physically Can't Exist"
+Under 60 characters. No clickbait that isn't actually true.
+
+Favor plain, dry, factual phrasing over dramatic adjectives. On this
+channel, "Why Space is Completely Silent" outperformed "Why Space Is
+Terrifyingly Silent" on the same topic — the flat version won. Avoid
+words like "terrifying," "insane," "shocking" in the title itself
+(they're fine sparingly in narration, just not as the title's hook).
+
+Break the script into scenes. Each scene is one or two sentences of
+narration, including the final scene. For each scene, also provide
+a visual:
+- visual_type: "literal" if real stock footage of this exists
+  (e.g. a dam, the ISS, a starfield, a person walking)
+- visual_type: "abstract" if it's a concept with no real footage
+  (e.g. gravitational time dilation, a wormhole cross-section,
+  spacetime curvature)
+- visual_query: for "literal", a 3-6 word stock footage search term.
+  For "abstract", a descriptive AI image generation prompt (can be
+  longer, be specific and cinematic).
+- For a "joke" ending, pick whichever visual actually supports the
+  punchline (often literal — the animal/phenomenon reacting, or a
+  simple relevant clip works better than an abstract image for
+  comedic timing).
+
+Return ONLY valid JSON, no markdown fences, no commentary, in this
+exact shape:
+
+{{
   "title": "short punchy YouTube title, under 60 characters",
   "hook": "the first scene's narration — must stop the scroll in 2-3 seconds",
   "scenes": [
-    {
+    {{
       "narration": "...",
       "visual_type": "literal",
       "visual_query": "..."
-    }
+    }}
   ],
   "hashtags": ["#shorts", "#space", "#facts"]
-}
+}}
 
 Topic: {topic}
 """
 
-def generate_script(topic: str) -> dict:
+def generate_script(topic: str, ending_style: str) -> dict:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash") # Updated model reference
+    model = genai.GenerativeModel("gemini-3.6-flash")
 
-    prompt = SCRIPT_SYSTEM_PROMPT.replace("{topic}", topic)
+    prompt = SCRIPT_SYSTEM_PROMPT.format(topic=topic, ending_style=ending_style)
     response = model.generate_content(
         prompt,
         generation_config={"response_mime_type": "application/json"},
@@ -171,13 +349,12 @@ def generate_script(topic: str) -> dict:
     return data
 
 # ------------------------------------------------------------------
-# 2. NARRATION (Edge TTS) — Faster pacing for shorts
+# 2. NARRATION (Edge TTS) — per scene, so we know each clip's timing
 # ------------------------------------------------------------------
 
 async def _synthesize(text: str, voice: str, out_path: Path):
     import edge_tts
-    # Added rate='+12%' for punchier short-form delivery
-    communicate = edge_tts.Communicate(text, voice, rate="+12%")
+    communicate = edge_tts.Communicate(text, voice)
     await communicate.save(str(out_path))
 
 def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
@@ -195,7 +372,7 @@ def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
     return results
 
 # ------------------------------------------------------------------
-# 3. VISUALS — Cinematic prompt enhancement for AI
+# 3. VISUALS — Pexels for literal, Pollinations for abstract
 # ------------------------------------------------------------------
 
 def fetch_pexels_video(query: str, out_path: Path) -> Path | None:
@@ -218,14 +395,24 @@ def fetch_pexels_video(query: str, out_path: Path) -> Path | None:
     return out_path
 
 def fetch_pollinations_image(prompt: str, out_path: Path) -> Path:
+    """Free, no-key AI image generation for abstract concepts.
+    Verifies the response is actually an image before saving, so a
+    rate-limit/error page from Pollinations can't silently become a
+    corrupt "image" file that only fails much later in moviepy."""
     import urllib.parse
-    # Automatically boost AI image quality with cinematic modifiers
-    enhanced_prompt = f"{prompt}, cinematic lighting, photorealistic, 8k, hyperdetailed, dark atmosphere, space documentary style"
-    encoded = urllib.parse.quote(enhanced_prompt)
-    
+    encoded = urllib.parse.quote(prompt)
     url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true"
+
     r = requests.get(url, timeout=60)
     r.raise_for_status()
+
+    content_type = r.headers.get("content-type", "")
+    if not content_type.startswith("image/"):
+        raise RuntimeError(
+            f"Pollinations did not return an image for prompt "
+            f"'{prompt[:60]}...' (content-type: {content_type})"
+        )
+
     out_path.write_bytes(r.content)
     return out_path
 
@@ -235,7 +422,6 @@ def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
         result = fetch_pexels_video(scene["visual_query"], out_path)
         if result:
             return {"type": "video", "path": result}
-        
         fallback_path = run_dir / f"visual_{index}.jpg"
         fetch_pollinations_image(scene["visual_query"], fallback_path)
         return {"type": "image", "path": fallback_path}
@@ -245,43 +431,21 @@ def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
         return {"type": "image", "path": out_path}
 
 # ------------------------------------------------------------------
-# 4. ASSEMBLY (moviepy) — Ken Burns zoom & BGM mixing
+# 4. ASSEMBLY (moviepy)
 # ------------------------------------------------------------------
-
-def apply_ken_burns(clip, duration, zoom_ratio=0.08):
-    """Adds a dynamic slow-zoom effect to static images."""
-    from moviepy import vfx
-    return clip.with_effects([
-        vfx.Resize(lambda t: 1 + (zoom_ratio * (t / duration)))
-    ])
-
-def add_background_music(final_clip, bgm_folder=Path("bgm")):
-    """Layers low-volume ambient music if available."""
-    from moviepy import AudioFileClip, CompositeAudioClip, vfx
-    bgm_files = list(bgm_folder.glob("*.mp3"))
-    if not bgm_files:
-        return final_clip
-    
-    bgm_path = random.choice(bgm_files)
-    bgm = AudioFileClip(str(bgm_path))
-    
-    # Loop BGM if shorter than final video, else trim it
-    if bgm.duration < final_clip.duration:
-        bgm = bgm.with_effects([vfx.Loop(duration=final_clip.duration)])
-    else:
-        bgm = bgm.subclipped(0, final_clip.duration)
-        
-    # Set background music volume low (12% of original)
-    bgm = bgm.with_effects([vfx.MultiplyVolume(0.12)])
-    
-    combined_audio = CompositeAudioClip([final_clip.audio, bgm])
-    return final_clip.with_audio(combined_audio)
 
 def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -> Path:
     from moviepy import (
         AudioFileClip, ImageClip, VideoFileClip, CompositeVideoClip,
         TextClip, concatenate_videoclips, vfx,
     )
+
+    if not Path(CAPTION_FONT_PATH).exists():
+        raise FileNotFoundError(
+            f"CAPTION_FONT_PATH does not exist: {CAPTION_FONT_PATH}. "
+            "moviepy 2.x has no default font fallback — upload a .ttf/.otf "
+            "and update CAPTION_FONT_PATH at the top of this file."
+        )
 
     scene_clips = []
 
@@ -297,18 +461,17 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -
             else:
                 clip = clip.subclipped(0, duration)
         else:
-            base_clip = ImageClip(str(visual["path"])).with_duration(duration)
-            clip = apply_ken_burns(base_clip, duration)
+            clip = ImageClip(str(visual["path"])).with_duration(duration)
 
         clip = clip.with_effects([vfx.Resize(height=VIDEO_H)]).with_position("center")
 
-        # Captions will now be fast, 2-4 word bursts
         caption = TextClip(
+            font=CAPTION_FONT_PATH,
             text=scene["narration"],
-            font_size=62, # Slightly larger for shorter bursts
+            font_size=54,
             color="yellow",
             stroke_color="black",
-            stroke_width=2.5,
+            stroke_width=2,
             method="caption",
             size=(VIDEO_W - 120, None),
             text_align="center",
@@ -320,9 +483,6 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -
         scene_clips.append(composite)
 
     final = concatenate_videoclips(scene_clips, method="compose")
-    
-    # Mix in background music automatically
-    final = add_background_music(final, BGM_DIR)
 
     out_path = run_dir / "final_video.mp4"
     final.write_videofile(
@@ -335,25 +495,32 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -
 # ------------------------------------------------------------------
 
 def run_pipeline():
-    topic = get_next_topic()
-    print(f"[1/4] Generating script for topic: {topic}")
-    script = generate_script(topic)
+    topic_entry = get_next_topic()
+    topic = topic_entry["topic"]
+    category = topic_entry["category"]
+
+    # Alternate ending style per run so both strategies keep getting
+    # fresh data logged against them for later comparison.
+    ending_style = random.choice(["loop", "joke"])
+
+    print(f"[1/4] Generating script for topic: {topic} (category={category}, ending={ending_style})")
+    script = generate_script(topic, ending_style)
     print(f"      Title: {script['title']}")
 
-    run_dir = OUTPUT_DIR / script["title"].replace(" ", "_").replace("/", "")[:40]
+    run_dir = OUTPUT_DIR / script["title"].replace(" ", "_")[:40]
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "script.json").write_text(json.dumps(script, indent=2))
 
-    print("[2/4] Synthesizing narration (Edge TTS, boosted pacing)...")
+    print("[2/4] Synthesizing narration (Edge TTS)...")
     audio_clips = synthesize_scene_audio(script["scenes"], run_dir)
 
-    print("[3/4] Fetching visuals (Pexels + Cinematic Pollinations)...")
+    print("[3/4] Fetching visuals (Pexels + Pollinations)...")
     visuals = [
         fetch_visual_for_scene(scene, i, run_dir)
         for i, scene in enumerate(script["scenes"])
     ]
 
-    print("[4/5] Assembling final video (Applying Ken Burns & BGM)...")
+    print("[4/5] Assembling final video...")
     final_path = build_video(script, audio_clips, visuals, run_dir)
 
     print("[5/5] Uploading to YouTube as unlisted + logging to dashboard...")
@@ -366,7 +533,7 @@ def run_pipeline():
         title=script["title"],
         description=description,
         tags=[h.replace("#", "") for h in script["hashtags"]],
-        privacy_status="unlisted", 
+        privacy_status="unlisted",
     )
     video_id = upload_result["id"]
     thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
@@ -378,6 +545,8 @@ def run_pipeline():
         hashtags=script["hashtags"],
         thumbnail_url=thumbnail_url,
         topic=topic,
+        category=category,
+        ending_style=ending_style,
         status="unlisted",
     )
 
