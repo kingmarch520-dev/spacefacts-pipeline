@@ -546,10 +546,13 @@ def run_pipeline():
         hashtags=script["hashtags"],
         thumbnail_url=thumbnail_url,
         topic=topic,
-        category=category,
-        ending_style=ending_style,
         status="unlisted",
     )
+    # NOTE: category and ending_style are tracked locally (printed above)
+    # but not yet logged to Supabase — log_video()'s current signature in
+    # supabase_client.py doesn't accept them. The category-weighting
+    # feature falls back to the seeded 55/45 split until that function is
+    # updated to store and return these fields.
 
     print(f"\nDone: {final_path}")
     print(f"YouTube (unlisted): https://youtu.be/{video_id}")
