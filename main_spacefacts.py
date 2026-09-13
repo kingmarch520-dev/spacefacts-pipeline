@@ -30,6 +30,9 @@ VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
    its own to take over the weighting live. Use
    log_manual_performance() to feed in numbers you read off YouTube
    Studio if you don't have API sync set up.
+4. Each run has a 50% chance of uploading as public instead of
+   unlisted (PUBLIC_PUBLISH_CHANCE below) — no more manual review
+   step needed for every single video before it can go live.
 4. Model stays on gemini-3.6-flash (current, correct, GA as of
    July 2026) — do not swap this back to gemini-1.5-flash or any
    1.x model, those are permanently shut down.
@@ -97,6 +100,11 @@ TTS_VOICES = [
 # logged yet; once get_video_performance() below returns real rows,
 # these are ignored in favor of live numbers.
 FALLBACK_CATEGORY_WEIGHTS = {"space": 0.55, "ocean": 0.45}
+
+# Odds that a given run's video is uploaded as public instead of
+# unlisted. Set to 0.5 for a 50/50 split. Every run still logs to
+# Supabase either way, so you can see which videos went public.
+PUBLIC_PUBLISH_CHANCE = 0.5
 
 # Manually logged view counts, for when you don't have YouTube Data
 # API sync wired up yet. Update this after checking YouTube Studio
@@ -524,7 +532,12 @@ def run_pipeline():
     print("[4/5] Assembling final video...")
     final_path = build_video(script, audio_clips, visuals, run_dir)
 
-    print("[5/5] Uploading to YouTube as unlisted + logging to dashboard...")
+    # 50/50 chance this run's video goes public vs. stays unlisted for
+    # manual review. Determined once per run so the print, upload call,
+    # and Supabase log all agree on the same value.
+    privacy_status = "public" if random.random() < PUBLIC_PUBLISH_CHANCE else "unlisted"
+
+    print(f"[5/5] Uploading to YouTube as {privacy_status} + logging to dashboard...")
     description = (
         f"{script.get('hook', '')}\n\n"
         f"{' '.join(script['hashtags'])}"
@@ -534,7 +547,7 @@ def run_pipeline():
         title=script["title"],
         description=description,
         tags=[h.replace("#", "") for h in script["hashtags"]],
-        privacy_status="unlisted",
+        privacy_status=privacy_status,
     )
     video_id = upload_result["id"]
     thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
@@ -546,7 +559,7 @@ def run_pipeline():
         hashtags=script["hashtags"],
         thumbnail_url=thumbnail_url,
         topic=topic,
-        status="unlisted",
+        status=privacy_status,
     )
     # NOTE: category and ending_style are tracked locally (printed above)
     # but not yet logged to Supabase — log_video()'s current signature in
@@ -555,7 +568,7 @@ def run_pipeline():
     # updated to store and return these fields.
 
     print(f"\nDone: {final_path}")
-    print(f"YouTube (unlisted): https://youtu.be/{video_id}")
+    print(f"YouTube ({privacy_status}): https://youtu.be/{video_id}")
     print("Review and publish from the dashboard.")
     return final_path
 
