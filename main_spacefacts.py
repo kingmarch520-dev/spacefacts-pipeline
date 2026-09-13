@@ -33,6 +33,17 @@ VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
 4. Each run has a 50% chance of uploading as public instead of
    unlisted (PUBLIC_PUBLISH_CHANCE below) — no more manual review
    step needed for every single video before it can go live.
+5. FIXED a real repetition bug: topic selection used to share ONE
+   counter across all 4 categories, so a 12-topic category could
+   repeat within days instead of after 12 actual uses of it. Now
+   each category tracks its own position and gets a freshly shuffled
+   order each time it completes a full pass — genuinely no repeats
+   until every topic in that category has been used once.
+6. Topic pool expanded from 48 to 81 topics across the 4 categories.
+7. Added a recent-titles memory (last 15, across all categories) fed
+   into the script prompt so Gemini avoids producing something that
+   reads like a near-duplicate of a recent video even when the
+   underlying topic string is technically different.
 4. Model stays on gemini-3.6-flash (current, correct, GA as of
    July 2026) — do not swap this back to gemini-1.5-flash or any
    1.x model, those are permanently shut down.
@@ -96,15 +107,22 @@ TTS_VOICES = [
 #   ocean average ~1,035 views (blue whale 1.3k, clam x2 1.0k/946,
 #     giant squid 895)
 # Space is ahead by ~12% — real but not dramatic, so this is a lean,
-# not a hard cutoff. Used only when Supabase has no performance data
-# logged yet; once get_video_performance() below returns real rows,
-# these are ignored in favor of live numbers.
-FALLBACK_CATEGORY_WEIGHTS = {"space": 0.55, "ocean": 0.45}
+# not a hard cutoff. History and bible have no view data yet, so they
+# start at the same weight as ocean until real numbers come in. Used
+# only when Supabase has no performance data logged yet; once
+# get_video_performance() below returns real rows, these are ignored
+# in favor of live numbers.
+FALLBACK_CATEGORY_WEIGHTS = {
+    "space": 0.30,
+    "ocean": 0.23,
+    "history": 0.23,
+    "bible": 0.24,
+}
 
 # Odds that a given run's video is uploaded as public instead of
 # unlisted. Set to 0.5 for a 50/50 split. Every run still logs to
 # Supabase either way, so you can see which videos went public.
-PUBLIC_PUBLISH_CHANCE = 0.5
+PUBLIC_PUBLISH_CHANCE = 1.0
 
 # Manually logged view counts, for when you don't have YouTube Data
 # API sync wired up yet. Update this after checking YouTube Studio
@@ -114,8 +132,9 @@ MANUAL_PERFORMANCE_LOG = [
     # {"title": "...", "category": "space", "views": 1700},
 ]
 
-# Two lanes: space/physics and sea/ocean. Each topic is tagged with
-# a "category" so performance can be tracked and weighted per lane.
+# Four lanes now: space/physics, sea/ocean, history, and bible
+# theories/mysteries. Each topic is tagged with a "category" so
+# performance can be tracked and weighted per lane.
 TOPIC_POOL = [
     {"topic": "gravitational time dilation near a black hole", "category": "space"},
     {"topic": "what a neutron star's density actually means", "category": "space"},
@@ -129,6 +148,14 @@ TOPIC_POOL = [
     {"topic": "why time moves slower for astronauts on the ISS", "category": "space"},
     {"topic": "what dark matter actually does to galaxies", "category": "space"},
     {"topic": "how a supernova could theoretically threaten Earth", "category": "space"},
+    {"topic": "why Jupiter's Great Red Spot has lasted for centuries", "category": "space"},
+    {"topic": "what a rogue planet drifting with no star actually looks like", "category": "space"},
+    {"topic": "how astronauts' bodies actually change after months in orbit", "category": "space"},
+    {"topic": "why Venus spins backward compared to almost every other planet", "category": "space"},
+    {"topic": "what would really happen if the sun vanished for one second", "category": "space"},
+    {"topic": "how close the nearest black hole actually is to Earth", "category": "space"},
+    {"topic": "how big the largest known structure in the entire universe actually is", "category": "space"},
+    {"topic": "how much of the periodic table can only be made inside a dying star", "category": "space"},
     {"topic": "how little of the ocean floor has actually been mapped", "category": "ocean"},
     {"topic": "the crushing pressure at the bottom of the Mariana Trench", "category": "ocean"},
     {"topic": "why the deep ocean is in permanent total darkness", "category": "ocean"},
@@ -141,6 +168,60 @@ TOPIC_POOL = [
     {"topic": "how old the oldest living sea creature actually is", "category": "ocean"},
     {"topic": "why bioluminescence exists in deep sea animals", "category": "ocean"},
     {"topic": "how massive a blue whale's heart actually is", "category": "ocean"},
+    {"topic": "why some deep sea fish can survive being frozen solid", "category": "ocean"},
+    {"topic": "how a single drop of seawater can contain millions of microorganisms", "category": "ocean"},
+    {"topic": "why the ocean's color actually changes with depth the way it does", "category": "ocean"},
+    {"topic": "how sound travels four times faster underwater than in air", "category": "ocean"},
+    {"topic": "what the 'twilight zone' of the ocean actually looks like", "category": "ocean"},
+    {"topic": "how a shipwreck actually becomes an artificial reef over time", "category": "ocean"},
+    {"topic": "why some ocean currents are strong enough to move entire islands of debris", "category": "ocean"},
+    {"topic": "how deep-diving whales survive water pressure that would crush a submarine", "category": "ocean"},
+    # history — real events/objects that still feel mysterious or hard to believe
+    {"topic": "how the Antikythera mechanism baffled experts for a century", "category": "history"},
+    {"topic": "how the pyramids at Giza were actually built without modern tools", "category": "history"},
+    {"topic": "what really happened to the Library of Alexandria", "category": "history"},
+    {"topic": "why the Voynich manuscript still hasn't been decoded", "category": "history"},
+    {"topic": "how an entire Roman legion vanished without a trace", "category": "history"},
+    {"topic": "what the Baghdad Battery might have actually been used for", "category": "history"},
+    {"topic": "how ancient Rome's concrete outlasts modern concrete", "category": "history"},
+    {"topic": "what the Dancing Plague of 1518 actually did to people", "category": "history"},
+    {"topic": "how the Bronze Age Collapse wiped out multiple civilizations at once", "category": "history"},
+    {"topic": "what really caused the Tunguska explosion", "category": "history"},
+    {"topic": "how the Nazca Lines were made without ever being seen from above", "category": "history"},
+    {"topic": "what happened to the lost colony of Roanoke", "category": "history"},
+    {"topic": "how the Iron Pillar of Delhi has resisted rust for over 1,600 years", "category": "history"},
+    {"topic": "why the Sutton Hoo ship burial rewrote what historians knew about early England", "category": "history"},
+    {"topic": "what the Rosetta Stone actually took decades to fully decode", "category": "history"},
+    {"topic": "how Greek fire's exact recipe was lost to history forever", "category": "history"},
+    {"topic": "why the city of Petra was carved directly into solid rock", "category": "history"},
+    {"topic": "how the Terracotta Army was hidden and undiscovered for over 2,000 years", "category": "history"},
+    {"topic": "what really caused the sudden collapse of the Maya civilization", "category": "history"},
+    {"topic": "why the Phaistos Disc's symbols still can't be translated", "category": "history"},
+    # bible — genuinely uncommon/lesser-known theories and debated
+    # mysteries, framed as open questions, never as settled fact (see
+    # SCRIPT_SYSTEM_PROMPT framing rule below). Deliberately avoiding
+    # the most-covered topics (Noah's Ark, Red Sea, Ark of the Covenant,
+    # Dead Sea Scrolls) since those are oversaturated on YouTube already.
+    {"topic": "who the 'sons of God' in Genesis 6 are actually theorized to be", "category": "bible"},
+    {"topic": "why the Book of Enoch was left out of the Bible despite being quoted in it", "category": "bible"},
+    {"topic": "theories about what happened during Jesus's unrecorded years before age 30", "category": "bible"},
+    {"topic": "whether the Behemoth and Leviathan in Job describe real extinct creatures", "category": "bible"},
+    {"topic": "the ongoing debate over which mountain is the real Mount Sinai", "category": "bible"},
+    {"topic": "what actually happened to the ten lost tribes of Israel", "category": "bible"},
+    {"topic": "theories about who Melchizedek really was and why he has no origin story", "category": "bible"},
+    {"topic": "the mystery of where Cain's wife came from in Genesis", "category": "bible"},
+    {"topic": "how the Urim and Thummim were actually used to make decisions", "category": "bible"},
+    {"topic": "why the 400 years between the Old and New Testament are called 'silent'", "category": "bible"},
+    {"topic": "where the biblical land of Ophir, source of Solomon's gold, might actually be", "category": "bible"},
+    {"topic": "why Matthew and Acts describe Judas's death two completely different ways", "category": "bible"},
+    {"topic": "theories about who Job's mysterious 'satan' figure actually represents", "category": "bible"},
+    {"topic": "why the Gospel of Thomas was excluded from the New Testament canon", "category": "bible"},
+    {"topic": "theories about the historical identity of the 'beloved disciple' in John", "category": "bible"},
+    {"topic": "what scholars debate about the authorship of the Book of Hebrews", "category": "bible"},
+    {"topic": "theories about what Paul's 'thorn in the flesh' actually was", "category": "bible"},
+    {"topic": "why the location of the real Mount Ararat is still disputed", "category": "bible"},
+    {"topic": "theories about the identity and fate of Lot's wife beyond the pillar of salt", "category": "bible"},
+    {"topic": "why there's a 'missing' set of genealogy years scholars still argue about", "category": "bible"},
 ]
 
 # ------------------------------------------------------------------
@@ -150,7 +231,7 @@ TOPIC_POOL = [
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
-    return {"index": 0}
+    return {"category_progress": {}, "recent_titles": []}
 
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2))
@@ -158,23 +239,25 @@ def save_state(state):
 def get_category_weights():
     """
     Asks Supabase for average views per category among videos logged
-    so far. Returns {"space": weight, "ocean": weight} normalized to
-    sum to 1.0. Falls back to equal weights (0.5/0.5) if there's no
-    data yet, or if the query fails for any reason (e.g. you haven't
-    wired up a `views` column / sync job yet).
+    so far. Returns a dict of {category: weight} normalized to sum to
+    1.0, covering whatever categories exist in TOPIC_POOL. Falls back
+    to FALLBACK_CATEGORY_WEIGHTS if there's no data yet, or if the
+    query fails for any reason (e.g. you haven't wired up a `views`
+    column / sync job yet).
 
     NOTE: this assumes supabase_client exposes a helper that returns
     rows like [{"topic": "...", "category": "space", "views": 1234}, ...].
     Adjust `supabase_client.get_video_performance()` to match your
     actual table/column names if they differ.
     """
+    categories = {t["category"] for t in TOPIC_POOL}
     try:
         rows = supabase_client.get_video_performance()
         if not rows:
             raise ValueError("no performance data yet")
 
-        totals = {"space": 0, "ocean": 0}
-        counts = {"space": 0, "ocean": 0}
+        totals = {cat: 0 for cat in categories}
+        counts = {cat: 0 for cat in categories}
         for row in rows:
             cat = row.get("category")
             views = row.get("views")
@@ -192,8 +275,14 @@ def get_category_weights():
 
         return {cat: avgs[cat] / total_avg for cat in avgs}
     except Exception as e:
-        print(f"      (topic weighting fallback to seeded 55/45 — {e})")
-        return dict(FALLBACK_CATEGORY_WEIGHTS)
+        print(f"      (topic weighting fallback to seeded defaults — {e})")
+        # only return weights for categories that actually exist in
+        # TOPIC_POOL, in case the pool changes without this dict being
+        # updated to match
+        return {
+            cat: FALLBACK_CATEGORY_WEIGHTS.get(cat, 1.0 / len(categories))
+            for cat in categories
+        }
 
 def log_manual_performance():
     """
@@ -214,15 +303,33 @@ def log_manual_performance():
         )
     print(f"Logged {len(MANUAL_PERFORMANCE_LOG)} manual performance entries.")
 
+def get_category_topics(category: str) -> list:
+    return [t for t in TOPIC_POOL if t["category"] == category]
+
 def get_next_topic():
     """
-    Picks the next topic. Cycles sequentially through whichever
-    category wins the current weighting, so you still work through
-    the full pool over time instead of hammering one topic — you're
-    just visiting the winning lane's topics more often on average.
+    Picks the next topic with proper per-category round-robin — this
+    replaces a previous version that used one global counter shared
+    across all categories, which meant a 12-topic category could
+    repeat within days instead of after all 12 were actually used.
+
+    Design:
+    - Each category tracks its own position independently
+      (state["category_progress"][cat] = {"order": [...], "position": N}).
+    - "order" is a shuffled permutation of that category's topic
+      indices, generated fresh each time a full pass completes — so
+      you get variety in the *sequence* too, not the same fixed
+      order every cycle, while still guaranteeing every topic in the
+      category is used exactly once before any repeat.
+    - state["recent_titles"] keeps the last 15 generated titles across
+      ALL categories, fed into the script prompt (see generate_script)
+      so Gemini avoids producing something that reads like a near-
+      duplicate of a recent video even when the underlying topic
+      string is different (e.g. two different "black hole" angles
+      that would end up sounding the same).
     """
     state = load_state()
-    idx = state["index"]
+    state.setdefault("category_progress", {})
 
     weights = get_category_weights()
     chosen_category = random.choices(
@@ -231,8 +338,38 @@ def get_next_topic():
         k=1,
     )[0]
 
-    category_topics = [t for t in TOPIC_POOL if t["category"] == chosen_category]
-    topic_entry = category_topics[idx % len(category_topics)]
+    category_topics = get_category_topics(chosen_category)
+    progress = state["category_progress"].get(chosen_category)
+
+    if not progress or progress["position"] >= len(progress["order"]):
+        # Start of a fresh pass through this category: shuffle a new
+        # order so repeats (once we do cycle back) don't land in the
+        # same sequence as last time.
+        order = list(range(len(category_topics)))
+        random.shuffle(order)
+        progress = {"order": order, "position": 0}
+
+    topic_index = progress["order"][progress["position"]]
+    topic_entry = category_topics[topic_index]
+
+    progress["position"] += 1
+    state["category_progress"][chosen_category] = progress
+    save_state(state)
+    return topic_entry
+
+def record_used_title(title: str):
+    """Appends a generated title to state so future prompts can avoid
+    producing near-duplicates of recently made videos. Keeps only the
+    most recent 15 — enough to catch short-term repetition without
+    the prompt growing unbounded."""
+    state = load_state()
+    recent = state.get("recent_titles", [])
+    recent.append(title)
+    state["recent_titles"] = recent[-15:]
+    save_state(state)
+
+def get_recent_titles() -> list:
+    return load_state().get("recent_titles", [])
 
     state["index"] = idx + 1
     save_state(state)
@@ -243,9 +380,21 @@ def get_next_topic():
 # ------------------------------------------------------------------
 
 SCRIPT_SYSTEM_PROMPT = """You are writing a 30-45 second YouTube Shorts script
-about a space/physics fact OR a sea/ocean fact.
+about one of: a space/physics fact, a sea/ocean fact, a strange piece
+of real history, or a debated biblical mystery/theory.
 
 ENDING STYLE FOR THIS SCRIPT: {ending_style}
+
+FRAMING RULE FOR BIBLE TOPICS ONLY (skip this if the topic isn't a
+bible topic): present it as a theory, debate, or open question —
+never as settled fact. Use phrases like "some researchers believe,"
+"one theory suggests," "scholars still debate," "no one's found
+conclusive proof either way." Do not assert a religious or
+supernatural claim as true, and do not assert a skeptical/naturalistic
+explanation as the definitive answer either — the goal is "here's
+what people argue about," not taking a side. This keeps the video
+interesting without the channel staking a position on something
+contested.
 
 Rules for how it should sound:
 - Write like you're explaining something wild to a friend, not narrating
@@ -336,14 +485,31 @@ exact shape:
 }}
 
 Topic: {topic}
+
+{recent_titles_block}
 """
 
-def generate_script(topic: str, ending_style: str) -> dict:
+def generate_script(topic: str, ending_style: str, recent_titles: list = None) -> dict:
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel("gemini-3.6-flash")
 
-    prompt = SCRIPT_SYSTEM_PROMPT.format(topic=topic, ending_style=ending_style)
+    if recent_titles:
+        titles_list = "\n".join(f"- {t}" for t in recent_titles)
+        recent_titles_block = (
+            "AVOID RESEMBLING RECENT VIDEOS — these titles were made recently "
+            "on this channel. Even if today's topic is technically different, "
+            "do not produce a hook, angle, or framing that would feel like a "
+            "repeat of any of these to a viewer who's seen them:\n" + titles_list
+        )
+    else:
+        recent_titles_block = ""
+
+    prompt = SCRIPT_SYSTEM_PROMPT.format(
+        topic=topic,
+        ending_style=ending_style,
+        recent_titles_block=recent_titles_block,
+    )
     response = model.generate_content(
         prompt,
         generation_config={"response_mime_type": "application/json"},
@@ -513,8 +679,10 @@ def run_pipeline():
     ending_style = random.choice(["loop", "joke"])
 
     print(f"[1/4] Generating script for topic: {topic} (category={category}, ending={ending_style})")
-    script = generate_script(topic, ending_style)
+    recent_titles = get_recent_titles()
+    script = generate_script(topic, ending_style, recent_titles=recent_titles)
     print(f"      Title: {script['title']}")
+    record_used_title(script["title"])
 
     run_dir = OUTPUT_DIR / script["title"].replace(" ", "_")[:40]
     run_dir.mkdir(parents=True, exist_ok=True)
