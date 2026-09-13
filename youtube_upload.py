@@ -18,11 +18,24 @@ ONE-TIME SETUP (do this once, from your phone browser):
        YT_CLIENT_SECRET
        YT_REFRESH_TOKEN
 
-UPLOAD BEHAVIOR:
-Videos upload as "private" by default. Nothing goes public until you
-approve it via the Telegram bot (see telegram_notify.py). This matches
-your existing privacy-status-randomization habit, but flips the
-default to safe-until-approved for this new channel.
+AI DISCLOSURE (status.containsSyntheticMedia):
+YouTube requires this flag set to true specifically for "realistic
+Altered or Synthetic (A/S) content" — content that could be mistaken
+for something real: making a real person appear to say/do something
+they didn't, altering footage of a real event, or generating a
+realistic scene depicting something that didn't actually happen.
+It is NOT a blanket requirement for "any AI was involved," and
+Google's own field definition is narrower than some third-party
+summaries suggest.
+
+This channel's videos are stylized concept illustrations (black
+holes, ocean trenches, etc.) with AI narration over stock/generated
+imagery — not depictions of real people or fabricated real events —
+so CONTAINS_SYNTHETIC_MEDIA defaults to False below. If your content
+ever shifts toward realistic depictions of real people, places, or
+events, flip this to True. Worth checking YouTube's current Creator
+Help pages yourself if you want certainty, since this policy area
+has been actively evolving.
 """
 
 import os
@@ -35,6 +48,9 @@ UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 YT_CLIENT_ID = os.environ.get("YT_CLIENT_ID", "")
 YT_CLIENT_SECRET = os.environ.get("YT_CLIENT_SECRET", "")
 YT_REFRESH_TOKEN = os.environ.get("YT_REFRESH_TOKEN", "")
+
+# See "AI DISCLOSURE" note above before changing this.
+CONTAINS_SYNTHETIC_MEDIA = False
 
 
 def get_access_token() -> str:
@@ -59,12 +75,20 @@ def upload_video(
     description: str,
     tags: list,
     privacy_status: str = "private",
+    contains_synthetic_media: bool = None,
 ) -> dict:
     """
     Uploads a video to YouTube. Returns the API response JSON, which
-    includes the new video's id (needed for the Telegram approve step).
+    includes the new video's id.
+
+    contains_synthetic_media: if None (default), uses the module-level
+    CONTAINS_SYNTHETIC_MEDIA constant above. Pass True/False explicitly
+    to override per-upload.
     """
     access_token = get_access_token()
+
+    if contains_synthetic_media is None:
+        contains_synthetic_media = CONTAINS_SYNTHETIC_MEDIA
 
     metadata = {
         "snippet": {
@@ -76,6 +100,7 @@ def upload_video(
         "status": {
             "privacyStatus": privacy_status,
             "selfDeclaredMadeForKids": False,
+            "containsSyntheticMedia": contains_synthetic_media,
         },
     }
 
@@ -106,9 +131,7 @@ def upload_video(
 
 
 def set_privacy_status(video_id: str, privacy_status: str):
-    """Used by the Telegram approve/skip buttons to flip a video
-    from private -> public (approve) or private -> private, unchanged
-    (skip, i.e. just leave it unlisted/private permanently)."""
+    """Flips a video's privacy status (e.g. unlisted -> public)."""
     access_token = get_access_token()
     resp = requests.put(
         f"https://www.googleapis.com/youtube/v3/videos?part=status",
@@ -127,7 +150,7 @@ def set_privacy_status(video_id: str, privacy_status: str):
 
 
 def delete_video(video_id: str):
-    """Used by the Telegram 'skip' button to remove a rejected upload."""
+    """Removes a video from YouTube entirely."""
     access_token = get_access_token()
     resp = requests.delete(
         f"https://www.googleapis.com/youtube/v3/videos?id={video_id}",
@@ -145,7 +168,8 @@ def get_refresh_token(client_id: str, client_secret: str):
     """
     Run this once interactively (e.g. in a Colab cell) to obtain your
     refresh token. Prints the value — copy it into your GitHub secret
-    YT_REFRESH_TOKEN.
+    YT_REFRESH_TOKEN (and into Vercel's env vars too, if you're using
+    the dashboard, so both stay in sync).
     """
     from google_auth_oauthlib.flow import InstalledAppFlow
 
