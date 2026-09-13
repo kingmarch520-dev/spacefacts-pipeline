@@ -2,9 +2,14 @@ name: Space Facts Automated Pipeline
 
 on:
   schedule:
-    # Runs exactly 3 times daily (08:00, 14:00, and 20:00 UTC)
-    - cron: "0 8,14,20 * * *"
+    # Runs every 4 hours (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC) -> 6 uploads/day
+    - cron: "0 */4 * * *"
   workflow_dispatch: {}  # Manual trigger option
+
+# Cancels older in-progress runs if a new run is triggered manually
+concurrency:
+  group: spacefacts-pipeline
+  cancel-in-progress: true
 
 jobs:
   generate-and-upload:
@@ -44,5 +49,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add state_spacefacts.json
-          git diff --staged --quiet || git commit -m "Update state after run [skip ci]"
-          git push
+          if ! git diff --staged --quiet; then
+            git commit -m "Update state after run [skip ci]"
+            git pull --rebase origin main
+            git push origin main
+          fi
