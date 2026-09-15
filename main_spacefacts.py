@@ -1,141 +1,37 @@
-"""
-==================================================================
-SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE
-==================================================================
-Built for Google Colab. Run cells top to bottom, or paste into
-one cell and execute.
-
-VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
-1. Ending style now alternates between two retention strategies
-   instead of always ending on a joke:
-     - "loop"  -> final scene loops back into the hook (higher
-                  average view duration, more rewatches)
-     - "joke"  -> punchline ending (higher comment/share rate)
-   Both get logged to Supabase per video so you can compare real
-   view/retention numbers between the two once you have a few
-   weeks of data, instead of guessing which style wins.
-2. Hook writing is no longer left vague. The prompt now gives
-   Gemini 5 concrete hook patterns, led by "compare the extreme to
-   something ordinary" — the pattern your actual best-performing
-   video ("We Built Something Colder Than Deep Space", 1.7k views)
-   used. Titles are steered toward plain/dry phrasing over dramatic
-   adjectives, based on your own A/B evidence: "Why Space is
-   Completely Silent" (971 views) beat "Why Space Is Terrifyingly
-   Silent" (876 views) on the identical topic.
-3. Topic selection is no longer strict round-robin. It's weighted
-   toward whichever category (space vs ocean) is performing better.
-   Seeded from your real 28-day YouTube Studio numbers (space
-   ~1,158 avg views, ocean ~1,035 avg — a real but modest ~12% lean,
-   not a hard cutoff) until Supabase has enough logged view data of
-   its own to take over the weighting live. Use
-   log_manual_performance() to feed in numbers you read off YouTube
-   Studio if you don't have API sync set up.
-4. Each run has a 50% chance of uploading as public instead of
-   unlisted (PUBLIC_PUBLISH_CHANCE below) — no more manual review
-   step needed for every single video before it can go live.
-5. FIXED a real repetition bug: topic selection used to share ONE
-   counter across all 4 categories, so a 12-topic category could
-   repeat within days instead of after 12 actual uses of it. Now
-   each category tracks its own position and gets a freshly shuffled
-   order each time it completes a full pass — genuinely no repeats
-   until every topic in that category has been used once.
-6. Topic pool expanded from 48 to 81 topics across the 4 categories.
-7. Added a recent-titles memory (last 15, across all categories) fed
-   into the script prompt so Gemini avoids producing something that
-   reads like a near-duplicate of a recent video even when the
-   underlying topic string is technically different.
-4. Model stays on gemini-3.6-flash (current, correct, GA as of
-   July 2026) — do not swap this back to gemini-1.5-flash or any
-   1.x model, those are permanently shut down.
-5. Pollinations image fetch now checks content-type before saving,
-   so a rate-limit/error response can't silently masquerade as a
-   valid image and blow up later in moviepy.
-6. TextClip now requires an explicit font path (moviepy 2.x has no
-   default font fallback) — set CAPTION_FONT_PATH below or captions
-   will crash the build step.
-
-REQUIRED INSTALLS (run first in Colab):
-    !pip install google-generativeai edge-tts moviepy pillow requests --quiet
-
-REQUIRED API KEYS (set as Colab secrets or env vars):
-    GEMINI_API_KEY   -> https://aistudio.google.com/apikey (free)
-    PEXELS_API_KEY   -> https://www.pexels.com/api/ (free)
-    Pollinations needs NO KEY — it's a plain GET request.
-==================================================================
-"""
-
 import os
-import json
+import sys
 import random
 import asyncio
-import requests
-from pathlib import Path
+from groq import Groq
+import edge_tts
+from moviepy.editor import (
+    VideoFileClip,
+    AudioFileClip,
+    TextClip,
+    CompositeVideoClip,
+    ColorClip
+)
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from google.oauth2.credentials import Credentials
 
-import youtube_upload
-import supabase_client
+# ----------------------------------------------------------------------
+# 1. CONFIGURATION & ENVIRONMENT SETUP
+# ----------------------------------------------------------------------
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "your-groq-api-key")
+YOUTUBE_TOKEN_PATH = os.getenv("YOUTUBE_TOKEN_PATH", "token.json")
+BG_VIDEO_PATH = "background.mp4"       # Default background video (1080x1920)
+OUTPUT_VIDEO = "final_short.mp4"
+TEMP_AUDIO = "voiceover.mp3"
 
-# ------------------------------------------------------------------
-# CONFIG
-# ------------------------------------------------------------------
+# Initialize Groq Client
+groq_client = Groq(api_key=GROQ_API_KEY)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "PASTE_YOUR_KEY_HERE")
-PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "PASTE_YOUR_KEY_HERE")
-
-STATE_FILE = Path("state_spacefacts.json")
-OUTPUT_DIR = Path("output_spacefacts")
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-VIDEO_W, VIDEO_H = 1080, 1920  # vertical shorts
-
-# moviepy 2.x TextClip has no built-in font fallback — this points at
-# a font file committed to the repo root (same folder as this script),
-# so it resolves the same way locally, in Colab, or in GitHub Actions.
-CAPTION_FONT_PATH = str(Path(__file__).parent / "Anton-Regular.ttf")
-
-# Rotate between a small, consistent set of Edge TTS voices.
-TTS_VOICES = [
-    "en-US-GuyNeural",       # calm male
-    "en-GB-RyanNeural",      # measured British male
-    "en-US-JennyNeural",     # warm female, explainer tone
-    "en-AU-WilliamNeural",   # relaxed Australian male
-]
-
-# Seeded from your actual YouTube Studio "Top content" numbers
-# (28-day window, 15 Aug - 11 Sept 2026):
-#   space average ~1,158 views (absolute zero 1.7k, galaxies 1.2k,
-#     supernova 1.1k, wormhole 1.1k, silence x2 971/876)
-#   ocean average ~1,035 views (blue whale 1.3k, clam x2 1.0k/946,
-#     giant squid 895)
-# Space is ahead by ~12% — real but not dramatic, so this is a lean,
-# not a hard cutoff. History and bible have no view data yet, so they
-# start at the same weight as ocean until real numbers come in. Used
-# only when Supabase has no performance data logged yet; once
-# get_video_performance() below returns real rows, these are ignored
-# in favor of live numbers.
-FALLBACK_CATEGORY_WEIGHTS = {
-    "space": 0.30,
-    "ocean": 0.23,
-    "history": 0.23,
-    "bible": 0.24,
-}
-
-# Odds that a given run's video is uploaded as public instead of
-# unlisted. Set to 0.5 for a 50/50 split. Every run still logs to
-# Supabase either way, so you can see which videos went public.
-PUBLIC_PUBLISH_CHANCE = 1.0
-
-# Manually logged view counts, for when you don't have YouTube Data
-# API sync wired up yet. Update this after checking YouTube Studio
-# every so often — log_manual_performance() folds these into Supabase
-# so the weighting stays current without needing API access.
-MANUAL_PERFORMANCE_LOG = [
-    # {"title": "...", "category": "space", "views": 1700},
-]
-
-# Four lanes now: space/physics, sea/ocean, history, and bible
-# theories/mysteries. Each topic is tagged with a "category" so
-# performance can be tracked and weighted per lane.
+# ----------------------------------------------------------------------
+# 2. TOPIC POOL (200 Total Topics across 4 Categories)
+# ----------------------------------------------------------------------
 TOPIC_POOL = [
+    # --- SPACE / PHYSICS (50 topics) ---
     {"topic": "gravitational time dilation near a black hole", "category": "space"},
     {"topic": "what a neutron star's density actually means", "category": "space"},
     {"topic": "why the observable universe has an edge", "category": "space"},
@@ -156,6 +52,38 @@ TOPIC_POOL = [
     {"topic": "how close the nearest black hole actually is to Earth", "category": "space"},
     {"topic": "how big the largest known structure in the entire universe actually is", "category": "space"},
     {"topic": "how much of the periodic table can only be made inside a dying star", "category": "space"},
+    {"topic": "why quantum entanglement stumped even Albert Einstein", "category": "space"},
+    {"topic": "what the Boötes Void actually is and why it's so empty", "category": "space"},
+    {"topic": "how magnetars possess the strongest magnetic fields in the cosmos", "category": "space"},
+    {"topic": "the terrifying theoretical concept of false vacuum decay", "category": "space"},
+    {"topic": "why dark energy is pushing the universe apart faster every second", "category": "space"},
+    {"topic": "why Oumuamua accelerated mysteriously out of our solar system", "category": "space"},
+    {"topic": "how Saturn's moon Titan has liquid methane rivers and seas", "category": "space"},
+    {"topic": "the massive water ice plumes blasting out of Enceladus", "category": "space"},
+    {"topic": "why the Cosmic Microwave Background has a mysterious Cold Spot", "category": "space"},
+    {"topic": "how supermassive black holes power ultra-bright quasars", "category": "space"},
+    {"topic": "what happens during a tidal disruption event when a star gets torn apart", "category": "space"},
+    {"topic": "how hypervelocity stars get launched completely out of galaxies", "category": "space"},
+    {"topic": "what a Kugelblitz black hole formed entirely from light would be", "category": "space"},
+    {"topic": "how fast pulsars spin and why they act like cosmic clocks", "category": "space"},
+    {"topic": "why scientists believe it rains liquid diamonds on Neptune and Uranus", "category": "space"},
+    {"topic": "what the Great Attractor pulling our galaxy actually is", "category": "space"},
+    {"topic": "the Kardashev scale and how civilizations harness stellar energy", "category": "space"},
+    {"topic": "the theoretical end scenarios of our universe from Big Rip to Heat Death", "category": "space"},
+    {"topic": "how a gamma-ray burst could strip Earth's ozone layer in seconds", "category": "space"},
+    {"topic": "how gravitational assists use planetary gravity to fling spacecraft", "category": "space"},
+    {"topic": "what would happen to Earth during a solar flare the size of the Carrington Event", "category": "space"},
+    {"topic": "why Olympus Mons on Mars is three times taller than Mount Everest", "category": "space"},
+    {"topic": "how deep Europa's hidden ocean might actually be", "category": "space"},
+    {"topic": "what the Drake Equation calculates about alien life", "category": "space"},
+    {"topic": "how wave-particle duality works in the famous double-slit experiment", "category": "space"},
+    {"topic": "why the speed of light is the absolute speed limit of the universe", "category": "space"},
+    {"topic": "what theoretical tachyons moving faster than light would cause", "category": "space"},
+    {"topic": "how the Wow! Signal was detected and why it remains unexplained", "category": "space"},
+    {"topic": "how gravitational waves ripple spacetime when black holes collide", "category": "space"},
+    {"topic": "what the Roche limit is and how it destroys moons that get too close", "category": "space"},
+
+    # --- OCEAN / SEA (50 topics) ---
     {"topic": "how little of the ocean floor has actually been mapped", "category": "ocean"},
     {"topic": "the crushing pressure at the bottom of the Mariana Trench", "category": "ocean"},
     {"topic": "why the deep ocean is in permanent total darkness", "category": "ocean"},
@@ -176,7 +104,38 @@ TOPIC_POOL = [
     {"topic": "how a shipwreck actually becomes an artificial reef over time", "category": "ocean"},
     {"topic": "why some ocean currents are strong enough to move entire islands of debris", "category": "ocean"},
     {"topic": "how deep-diving whales survive water pressure that would crush a submarine", "category": "ocean"},
-    # history — real events/objects that still feel mysterious or hard to believe
+    {"topic": "what caused the mystery behind the underwater 'Bloop' sound", "category": "ocean"},
+    {"topic": "how siphonophores grow to be the longest organisms in the sea", "category": "ocean"},
+    {"topic": "what abyssal gigantism does to creatures living in the deep ocean", "category": "ocean"},
+    {"topic": "how underwater brinicles act as icicles of death on the ocean floor", "category": "ocean"},
+    {"topic": "why Point Nemo is the most isolated spot in the entire ocean", "category": "ocean"},
+    {"topic": "how a whale fall ecosystem can feed deep sea life for decades", "category": "ocean"},
+    {"topic": "how the fangtooth fish copes with extreme ocean pressure", "category": "ocean"},
+    {"topic": "how vampire squids survive in zones with almost zero oxygen", "category": "ocean"},
+    {"topic": "why the dragonfish has ultra-black skin that absorbs 99.5 percent of light", "category": "ocean"},
+    {"topic": "how the mantis shrimp punches with the force of a bullet underwater", "category": "ocean"},
+    {"topic": "how the goblin shark's unhinging jaw catches deep-sea prey", "category": "ocean"},
+    {"topic": "why the Sargasso Sea is the only sea with no land boundaries", "category": "ocean"},
+    {"topic": "how rogue waves over 80 feet high appear out of nowhere in open ocean", "category": "ocean"},
+    {"topic": "how the Denmark Strait cataract forms the world's largest underwater waterfall", "category": "ocean"},
+    {"topic": "how the coelacanth was discovered alive after being thought extinct for 66 million years", "category": "ocean"},
+    {"topic": "how the immortal jellyfish can theoretically revert its cells back to youth", "category": "ocean"},
+    {"topic": "why the barreleye fish has a completely transparent head", "category": "ocean"},
+    {"topic": "how the scale-foot snail grows an armored shell out of real iron", "category": "ocean"},
+    {"topic": "how deep the deepest recorded fish live in the ocean", "category": "ocean"},
+    {"topic": "what flammable methane ice deposits on the ocean floor actually are", "category": "ocean"},
+    {"topic": "why blue holes contain toxic oxygen-free water layers", "category": "ocean"},
+    {"topic": "why octopuses have blue copper-based blood instead of iron-based blood", "category": "ocean"},
+    {"topic": "why the blobfish only looks strange when removed from deep sea pressure", "category": "ocean"},
+    {"topic": "how ocean currents form massive gyres that trap floating plastics", "category": "ocean"},
+    {"topic": "how dumbo octopuses navigate at depths over 13,000 feet", "category": "ocean"},
+    {"topic": "why the frilled shark is considered a living prehistoric fossil", "category": "ocean"},
+    {"topic": "how ocean brine pools form underwater lakes with their own shorelines", "category": "ocean"},
+    {"topic": "how the Greenland shark can live for up to 400 years in arctic waters", "category": "ocean"},
+    {"topic": "how cookiecutter sharks gouge precise circular wounds on massive sea life", "category": "ocean"},
+    {"topic": "how sperm whales use high-decibel clicks to stun prey underwater", "category": "ocean"},
+
+    # --- HISTORY / ANCIENT MYSTERIES (50 topics) ---
     {"topic": "how the Antikythera mechanism baffled experts for a century", "category": "history"},
     {"topic": "how the pyramids at Giza were actually built without modern tools", "category": "history"},
     {"topic": "what really happened to the Library of Alexandria", "category": "history"},
@@ -197,11 +156,38 @@ TOPIC_POOL = [
     {"topic": "how the Terracotta Army was hidden and undiscovered for over 2,000 years", "category": "history"},
     {"topic": "what really caused the sudden collapse of the Maya civilization", "category": "history"},
     {"topic": "why the Phaistos Disc's symbols still can't be translated", "category": "history"},
-    # bible — genuinely uncommon/lesser-known theories and debated
-    # mysteries, framed as open questions, never as settled fact (see
-    # SCRIPT_SYSTEM_PROMPT framing rule below). Deliberately avoiding
-    # the most-covered topics (Noah's Ark, Red Sea, Ark of the Covenant,
-    # Dead Sea Scrolls) since those are oversaturated on YouTube already.
+    {"topic": "how Derinkuyu underground city housed 20,000 people beneath Earth's surface", "category": "history"},
+    {"topic": "why Göbekli Tepe challenges historical timelines of early agriculture", "category": "history"},
+    {"topic": "how Easter Island's Moai statues actually have massive buried bodies beneath the soil", "category": "history"},
+    {"topic": "how the sunken ancient Egyptian city of Heracleion was discovered underwater", "category": "history"},
+    {"topic": "how the Nebra sky disc accurately represented the night sky 3,600 years ago", "category": "history"},
+    {"topic": "what caused the mysterious 1855 footprints known as the Devil's Footprints", "category": "history"},
+    {"topic": "how Sacsayhuamán's massive megalithic stones fit together without mortar", "category": "history"},
+    {"topic": "what evidence exists surrounding the Dyatlov Pass incident", "category": "history"},
+    {"topic": "why the tomb of China's first emperor is rumored to have rivers of liquid mercury", "category": "history"},
+    {"topic": "how 6 million human skeletons ended up inside the Catacombs of Paris", "category": "history"},
+    {"topic": "the chilling distress signal sent by the ghost ship SS Ourang Medan", "category": "history"},
+    {"topic": "how Pytheas of Massalia navigated to the Arctic circle in 320 BC", "category": "history"},
+    {"topic": "how L'Anse aux Meadows proved Vikings reached North America long before Columbus", "category": "history"},
+    {"topic": "the weird architecture and maze-like layout of the Winchester Mystery House", "category": "history"},
+    {"topic": "the mysterious 12th-century legend of the Green Children of Woolpit", "category": "history"},
+    {"topic": "why the Tarim mummies found in China had European facial features", "category": "history"},
+    {"topic": "the dark history and speed at which the Codex Gigas was written", "category": "history"},
+    {"topic": "how the Royal Game of Ur was rediscovered as the world's oldest playable board game", "category": "history"},
+    {"topic": "why the Sanxingdui bronze heads with alien-like eyes shocked archaeologists", "category": "history"},
+    {"topic": "why the Mary Celeste was found floating completely deserted with intact cargo", "category": "history"},
+    {"topic": "how the Oak Island Money Pit booby-traps foiled treasure hunters for centuries", "category": "history"},
+    {"topic": "how the priceless Amber Room vanished during World War II", "category": "history"},
+    {"topic": "how three Roman legions were wiped out in the Battle of Teutoburg Forest", "category": "history"},
+    {"topic": "what causes the persistent low-frequency hum reported in Taos, New Mexico", "category": "history"},
+    {"topic": "how the hand-carved Longyou caves in China were constructed without historical records", "category": "history"},
+    {"topic": "what the massive stone Plain of Jars in Laos was used for", "category": "history"},
+    {"topic": "whether the submerged rock formation known as Bimini Road is natural or manmade", "category": "history"},
+    {"topic": "how Denisovan bone fragments revealed a lost branch of ancient humans", "category": "history"},
+    {"topic": "how the sailing stones of Racetrack Playa move across dry lakebeds on their own", "category": "history"},
+    {"topic": "why the identity of the Man in the Iron Mask remained a state secret", "category": "history"},
+
+    # --- BIBLE MYSTERIES & THEORIES (50 topics) ---
     {"topic": "who the 'sons of God' in Genesis 6 are actually theorized to be", "category": "bible"},
     {"topic": "why the Book of Enoch was left out of the Bible despite being quoted in it", "category": "bible"},
     {"topic": "theories about what happened during Jesus's unrecorded years before age 30", "category": "bible"},
@@ -222,524 +208,241 @@ TOPIC_POOL = [
     {"topic": "why the location of the real Mount Ararat is still disputed", "category": "bible"},
     {"topic": "theories about the identity and fate of Lot's wife beyond the pillar of salt", "category": "bible"},
     {"topic": "why there's a 'missing' set of genealogy years scholars still argue about", "category": "bible"},
+    {"topic": "theories on where the Garden of Eden was located based on its four rivers", "category": "bible"},
+    {"topic": "how the Tower of Babel narrative connects to ancient Mesopotamian ziggurats", "category": "bible"},
+    {"topic": "claims regarding the current location of the Ark of the Covenant in Ethiopia", "category": "bible"},
+    {"topic": "the debate over Archangel Michael and the dispute over the body of Moses", "category": "bible"},
+    {"topic": "geological theories surrounding the location of the Red Sea crossing", "category": "bible"},
+    {"topic": "theories on what the natural or miraculous origin of manna might have been", "category": "bible"},
+    {"topic": "scholarly interpretations of Balaam's talking donkey narrative", "category": "bible"},
+    {"topic": "the scientific and radiocarbon controversies surrounding the Shroud of Turin", "category": "bible"},
+    {"topic": "the debate over whether the Witch of Endor summoned a real spirit or executed a fraud", "category": "bible"},
+    {"topic": "how flood narratives appear in ancient non-biblical texts like Gilgamesh", "category": "bible"},
+    {"topic": "different interpretations of Ezekiel's vision of wheels within wheels", "category": "bible"},
+    {"topic": "theories explaining the astronomical phenomenon of Joshua's long day", "category": "bible"},
+    {"topic": "why some early papyri list the Number of the Beast as 616 instead of 666", "category": "bible"},
+    {"topic": "whether Ezekiel's Valley of Dry Bones was intended as metaphor or literal prophecy", "category": "bible"},
+    {"topic": "archaeological evidence suggesting a meteor airburst at Sodom and Gomorrah", "category": "bible"},
+    {"topic": "astronomical theories explaining what the Star of Bethlehem actually was", "category": "bible"},
+    {"topic": "historical theories attempting to identify the real identity of King Nimrod", "category": "bible"},
+    {"topic": "how the Dead Sea Scrolls changed our understanding of biblical translation accuracy", "category": "bible"},
+    {"topic": "the Melchizedek scroll found at Qumran and its divine descriptions", "category": "bible"},
+    {"topic": "the massive iron bed dimensions recorded for Og, King of Bashan", "category": "bible"},
+    {"topic": "theories regarding who the Two Witnesses in Revelation are symbolic or literal of", "category": "bible"},
+    {"topic": "astronomical records comparing the crucifixion darkness to recorded solar eclipses", "category": "bible"},
+    {"topic": "the ongoing debate over whether Ramses II or Amenhotep II was the Pharaoh of the Exodus", "category": "bible"},
+    {"topic": "archaeological digs uncovering the Etemenanki ziggurat linked to Babel", "category": "bible"},
+    {"topic": "why the biblical account omits details about Lazarus's four days in the afterlife", "category": "bible"},
+    {"topic": "historicist vs futurist interpretations of the Four Horsemen", "category": "bible"},
+    {"topic": "geopolitical and historical theories surrounding the identities of Gog and Magog", "category": "bible"},
+    {"topic": "symbolic distinctions between the Tree of Life and the Tree of Knowledge", "category": "bible"},
+    {"topic": "the legal procedural violations argued during the night trial of Jesus under Talmudic law", "category": "bible"},
+    {"topic": "how the copper scroll of Qumran lists hidden temple treasures across ancient Judea", "category": "bible"},
 ]
 
-# ------------------------------------------------------------------
-# STATE HANDLING
-# ------------------------------------------------------------------
-
-def load_state():
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {"category_progress": {}, "recent_titles": []}
-
-def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
-
-def get_category_weights():
-    """
-    Asks Supabase for average views per category among videos logged
-    so far. Returns a dict of {category: weight} normalized to sum to
-    1.0, covering whatever categories exist in TOPIC_POOL. Falls back
-    to FALLBACK_CATEGORY_WEIGHTS if there's no data yet, or if the
-    query fails for any reason (e.g. you haven't wired up a `views`
-    column / sync job yet).
-
-    NOTE: this assumes supabase_client exposes a helper that returns
-    rows like [{"topic": "...", "category": "space", "views": 1234}, ...].
-    Adjust `supabase_client.get_video_performance()` to match your
-    actual table/column names if they differ.
-    """
-    categories = {t["category"] for t in TOPIC_POOL}
-    try:
-        rows = supabase_client.get_video_performance()
-        if not rows:
-            raise ValueError("no performance data yet")
-
-        totals = {cat: 0 for cat in categories}
-        counts = {cat: 0 for cat in categories}
-        for row in rows:
-            cat = row.get("category")
-            views = row.get("views")
-            if cat in totals and isinstance(views, (int, float)):
-                totals[cat] += views
-                counts[cat] += 1
-
-        avgs = {
-            cat: (totals[cat] / counts[cat] if counts[cat] > 0 else 0)
-            for cat in totals
-        }
-        total_avg = sum(avgs.values())
-        if total_avg <= 0:
-            raise ValueError("no usable view data yet")
-
-        return {cat: avgs[cat] / total_avg for cat in avgs}
-    except Exception as e:
-        print(f"      (topic weighting fallback to seeded defaults — {e})")
-        # only return weights for categories that actually exist in
-        # TOPIC_POOL, in case the pool changes without this dict being
-        # updated to match
-        return {
-            cat: FALLBACK_CATEGORY_WEIGHTS.get(cat, 1.0 / len(categories))
-            for cat in categories
-        }
-
-def log_manual_performance():
-    """
-    Run this by hand whenever you've checked YouTube Studio and want
-    to fold updated view counts into the weighting, without needing
-    YouTube Data API access. Fill in MANUAL_PERFORMANCE_LOG above,
-    then call this once. Requires supabase_client to expose an
-    upsert-style helper — adjust to match your actual client.
-    """
-    if not MANUAL_PERFORMANCE_LOG:
-        print("MANUAL_PERFORMANCE_LOG is empty — nothing to log.")
-        return
-    for entry in MANUAL_PERFORMANCE_LOG:
-        supabase_client.upsert_video_performance(
-            title=entry["title"],
-            category=entry["category"],
-            views=entry["views"],
-        )
-    print(f"Logged {len(MANUAL_PERFORMANCE_LOG)} manual performance entries.")
-
-def get_category_topics(category: str) -> list:
-    return [t for t in TOPIC_POOL if t["category"] == category]
-
-def get_next_topic():
-    """
-    Picks the next topic with proper per-category round-robin — this
-    replaces a previous version that used one global counter shared
-    across all categories, which meant a 12-topic category could
-    repeat within days instead of after all 12 were actually used.
-
-    Design:
-    - Each category tracks its own position independently
-      (state["category_progress"][cat] = {"order": [...], "position": N}).
-    - "order" is a shuffled permutation of that category's topic
-      indices, generated fresh each time a full pass completes — so
-      you get variety in the *sequence* too, not the same fixed
-      order every cycle, while still guaranteeing every topic in the
-      category is used exactly once before any repeat.
-    - state["recent_titles"] keeps the last 15 generated titles across
-      ALL categories, fed into the script prompt (see generate_script)
-      so Gemini avoids producing something that reads like a near-
-      duplicate of a recent video even when the underlying topic
-      string is different (e.g. two different "black hole" angles
-      that would end up sounding the same).
-    """
-    state = load_state()
-    state.setdefault("category_progress", {})
-
-    weights = get_category_weights()
-    chosen_category = random.choices(
-        population=list(weights.keys()),
-        weights=list(weights.values()),
-        k=1,
-    )[0]
-
-    category_topics = get_category_topics(chosen_category)
-    progress = state["category_progress"].get(chosen_category)
-
-    if not progress or progress["position"] >= len(progress["order"]):
-        # Start of a fresh pass through this category: shuffle a new
-        # order so repeats (once we do cycle back) don't land in the
-        # same sequence as last time.
-        order = list(range(len(category_topics)))
-        random.shuffle(order)
-        progress = {"order": order, "position": 0}
-
-    topic_index = progress["order"][progress["position"]]
-    topic_entry = category_topics[topic_index]
-
-    progress["position"] += 1
-    state["category_progress"][chosen_category] = progress
-    save_state(state)
-    return topic_entry
-
-def record_used_title(title: str):
-    """Appends a generated title to state so future prompts can avoid
-    producing near-duplicates of recently made videos. Keeps only the
-    most recent 15 — enough to catch short-term repetition without
-    the prompt growing unbounded."""
-    state = load_state()
-    recent = state.get("recent_titles", [])
-    recent.append(title)
-    state["recent_titles"] = recent[-15:]
-    save_state(state)
-
-def get_recent_titles() -> list:
-    return load_state().get("recent_titles", [])
-
-    state["index"] = idx + 1
-    save_state(state)
-    return topic_entry
-
-# ------------------------------------------------------------------
-# 1. SCRIPT GENERATION (Gemini) — scene-segmented, hook-engineered
-# ------------------------------------------------------------------
-
-SCRIPT_SYSTEM_PROMPT = """You are writing a 30-45 second YouTube Shorts script
-about one of: a space/physics fact, a sea/ocean fact, a strange piece
-of real history, or a debated biblical mystery/theory.
-
-ENDING STYLE FOR THIS SCRIPT: {ending_style}
-
-FRAMING RULE FOR BIBLE TOPICS ONLY (skip this if the topic isn't a
-bible topic): present it as a theory, debate, or open question —
-never as settled fact. Use phrases like "some researchers believe,"
-"one theory suggests," "scholars still debate," "no one's found
-conclusive proof either way." Do not assert a religious or
-supernatural claim as true, and do not assert a skeptical/naturalistic
-explanation as the definitive answer either — the goal is "here's
-what people argue about," not taking a side. This keeps the video
-interesting without the channel staking a position on something
-contested.
-
-Rules for how it should sound:
-- Write like you're explaining something wild to a friend, not narrating
-  a documentary.
-- Use contractions (it's, you'd, that's, don't).
-- Vary sentence length: mix short punchy lines with one longer
-  explanatory line.
-- Do NOT use rhetorical filler like "this isn't science fiction, it's
-  reality" or "prepare to have your mind blown."
-- Do NOT stack intensifiers (incredibly, absolutely, insanely). Pick
-  ONE strong word max per sentence, and only when it's earned.
-- Include exactly one moment of genuine surprise or disbelief, phrased
-  like a reaction, not a lecture.
-- Deliver the core fact clearly before the final scene.
-
-HOOK (the very first scene's narration) — use ONE of these patterns,
-whichever fits the topic best. The hook must work in 2-3 seconds:
-  1. Compare the extreme to something ordinary the viewer already has
-     a mental reference for. This is the strongest pattern of the
-     five — it's what the channel's best-performing video used:
-     e.g. "We built something colder than deep space."
-  2. Lead with a specific number or stat before any setup:
-     e.g. "One teaspoon of this would weigh six billion tons."
-  3. Direct address framed as a personal stake:
-     e.g. "You wouldn't even last one second down there."
-  4. False premise, immediate correction:
-     e.g. "Everyone thinks space is empty. It's not even close."
-  5. Blunt, ominous fact fragment, no lead-in at all:
-     e.g. "This star could swallow our entire solar system."
-Prefer pattern 1 when a genuinely apt comparison exists for the topic.
-Do NOT use generic hook filler like "did you know" or "here's a fact
-that will blow your mind."
-
-ENDING — follow whichever style is set above:
-- If ending_style is "loop": the FINAL scene must end mid-thought or
-  lead seamlessly into the very first word of the hook, so the video
-  loops endlessly with no visible seam. No joke, no summary, no moral.
-  Example: hook is "...is why you can never touch a black hole." ->
-  final scene is "And that terrifying reality..." (loops back to hook).
-- If ending_style is "joke": the FINAL scene must be a short joke or
-  pun directly related to the fact — one line, genuinely funny, not a
-  generic "dad joke for the sake of it." It should feel like a natural
-  button on the video, the kind of line that gets a laugh-comment. If
-  a clean pun exists in the topic (wordplay on the animal, phenomenon,
-  or scientific term), prefer that over a generic joke.
-
-TITLE — use a curiosity-gap framing, not a flat description:
-  Weak:  "Facts About Deep Ocean Darkness"
-  Strong: "The Ocean Depth Where Light Physically Can't Exist"
-Under 60 characters. No clickbait that isn't actually true.
-
-Favor plain, dry, factual phrasing over dramatic adjectives. On this
-channel, "Why Space is Completely Silent" outperformed "Why Space Is
-Terrifyingly Silent" on the same topic — the flat version won. Avoid
-words like "terrifying," "insane," "shocking" in the title itself
-(they're fine sparingly in narration, just not as the title's hook).
-
-Break the script into scenes. Each scene is one or two sentences of
-narration, including the final scene. For each scene, also provide
-a visual:
-- visual_type: "literal" if real stock footage of this exists
-  (e.g. a dam, the ISS, a starfield, a person walking)
-- visual_type: "abstract" if it's a concept with no real footage
-  (e.g. gravitational time dilation, a wormhole cross-section,
-  spacetime curvature)
-- visual_query: for "literal", a 3-6 word stock footage search term.
-  For "abstract", a descriptive AI image generation prompt (can be
-  longer, be specific and cinematic).
-- For a "joke" ending, pick whichever visual actually supports the
-  punchline (often literal — the animal/phenomenon reacting, or a
-  simple relevant clip works better than an abstract image for
-  comedic timing).
-
-Return ONLY valid JSON, no markdown fences, no commentary, in this
-exact shape:
-
-{{
-  "title": "short punchy YouTube title, under 60 characters",
-  "hook": "the first scene's narration — must stop the scroll in 2-3 seconds",
-  "scenes": [
-    {{
-      "narration": "...",
-      "visual_type": "literal",
-      "visual_query": "..."
-    }}
-  ],
-  "hashtags": ["#shorts", "#space", "#facts"]
-}}
-
-Topic: {topic}
-
-{recent_titles_block}
-"""
-
-def generate_script(topic: str, ending_style: str, recent_titles: list = None) -> dict:
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-3.6-flash")
-
-    if recent_titles:
-        titles_list = "\n".join(f"- {t}" for t in recent_titles)
-        recent_titles_block = (
-            "AVOID RESEMBLING RECENT VIDEOS — these titles were made recently "
-            "on this channel. Even if today's topic is technically different, "
-            "do not produce a hook, angle, or framing that would feel like a "
-            "repeat of any of these to a viewer who's seen them:\n" + titles_list
-        )
-    else:
-        recent_titles_block = ""
-
-    prompt = SCRIPT_SYSTEM_PROMPT.format(
-        topic=topic,
-        ending_style=ending_style,
-        recent_titles_block=recent_titles_block,
-    )
-    response = model.generate_content(
-        prompt,
-        generation_config={"response_mime_type": "application/json"},
-    )
-
-    data = json.loads(response.text)
-
-    assert "scenes" in data and len(data["scenes"]) > 0, "No scenes returned"
-    for scene in data["scenes"]:
-        assert scene["visual_type"] in ("literal", "abstract")
-
-    return data
-
-# ------------------------------------------------------------------
-# 2. NARRATION (Edge TTS) — per scene, so we know each clip's timing
-# ------------------------------------------------------------------
-
-async def _synthesize(text: str, voice: str, out_path: Path):
-    import edge_tts
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(str(out_path))
-
-def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
-    from moviepy import AudioFileClip
-
-    voice = random.choice(TTS_VOICES)
-    results = []
-
-    for i, scene in enumerate(scenes):
-        out_path = run_dir / f"scene_{i}.mp3"
-        asyncio.run(_synthesize(scene["narration"], voice, out_path))
-        duration = AudioFileClip(str(out_path)).duration
-        results.append({"path": out_path, "duration": duration})
-
-    return results
-
-# ------------------------------------------------------------------
-# 3. VISUALS — Pexels for literal, Pollinations for abstract
-# ------------------------------------------------------------------
-
-def fetch_pexels_video(query: str, out_path: Path) -> Path | None:
-    headers = {"Authorization": PEXELS_API_KEY}
-    url = "https://api.pexels.com/videos/search"
-    params = {"query": query, "orientation": "portrait", "per_page": 5}
-
-    r = requests.get(url, headers=headers, params=params, timeout=20)
-    r.raise_for_status()
-    videos = r.json().get("videos", [])
-    if not videos:
-        return None
-
-    video = random.choice(videos[: min(3, len(videos))])
-    files = sorted(video["video_files"], key=lambda f: f.get("width", 0))
-    chosen = next((f for f in files if f.get("width", 0) >= 720), files[-1])
-
-    video_data = requests.get(chosen["link"], timeout=30).content
-    out_path.write_bytes(video_data)
-    return out_path
-
-def fetch_pollinations_image(prompt: str, out_path: Path) -> Path:
-    """Free, no-key AI image generation for abstract concepts.
-    Verifies the response is actually an image before saving, so a
-    rate-limit/error page from Pollinations can't silently become a
-    corrupt "image" file that only fails much later in moviepy."""
-    import urllib.parse
-    encoded = urllib.parse.quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true"
-
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-
-    content_type = r.headers.get("content-type", "")
-    if not content_type.startswith("image/"):
-        raise RuntimeError(
-            f"Pollinations did not return an image for prompt "
-            f"'{prompt[:60]}...' (content-type: {content_type})"
-        )
-
-    out_path.write_bytes(r.content)
-    return out_path
-
-def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
-    if scene["visual_type"] == "literal":
-        out_path = run_dir / f"visual_{index}.mp4"
-        result = fetch_pexels_video(scene["visual_query"], out_path)
-        if result:
-            return {"type": "video", "path": result}
-        fallback_path = run_dir / f"visual_{index}.jpg"
-        fetch_pollinations_image(scene["visual_query"], fallback_path)
-        return {"type": "image", "path": fallback_path}
-    else:
-        out_path = run_dir / f"visual_{index}.jpg"
-        fetch_pollinations_image(scene["visual_query"], out_path)
-        return {"type": "image", "path": out_path}
-
-# ------------------------------------------------------------------
-# 4. ASSEMBLY (moviepy)
-# ------------------------------------------------------------------
-
-def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -> Path:
-    from moviepy import (
-        AudioFileClip, ImageClip, VideoFileClip, CompositeVideoClip,
-        TextClip, concatenate_videoclips, vfx,
-    )
-
-    if not Path(CAPTION_FONT_PATH).exists():
-        raise FileNotFoundError(
-            f"CAPTION_FONT_PATH does not exist: {CAPTION_FONT_PATH}. "
-            "Make sure Anton-Regular.ttf (or your chosen font) is committed "
-            "to the repo root, next to main_spacefacts.py."
-        )
-
-    scene_clips = []
-
-    for i, scene in enumerate(script["scenes"]):
-        audio = AudioFileClip(str(audio_clips[i]["path"]))
-        duration = audio.duration
-        visual = visuals[i]
-
-        if visual["type"] == "video":
-            clip = VideoFileClip(str(visual["path"])).without_audio()
-            if clip.duration < duration:
-                clip = clip.with_effects([vfx.Loop(duration=duration)])
-            else:
-                clip = clip.subclipped(0, duration)
-        else:
-            clip = ImageClip(str(visual["path"])).with_duration(duration)
-
-        clip = clip.with_effects([vfx.Resize(height=VIDEO_H)]).with_position("center")
-
-        caption = TextClip(
-            font=CAPTION_FONT_PATH,
-            text=scene["narration"],
-            font_size=54,
-            color="yellow",
-            stroke_color="black",
-            stroke_width=2,
-            method="caption",
-            size=(VIDEO_W - 120, None),
-            text_align="center",
-            duration=duration,
-        ).with_position(("center", "center"))
-
-        composite = CompositeVideoClip([clip, caption], size=(VIDEO_W, VIDEO_H))
-        composite = composite.with_audio(audio)
-        scene_clips.append(composite)
-
-    final = concatenate_videoclips(scene_clips, method="compose")
-
-    out_path = run_dir / "final_video.mp4"
-    final.write_videofile(
-        str(out_path), fps=30, codec="libx264", audio_codec="aac"
-    )
-    return out_path
-
-# ------------------------------------------------------------------
-# MAIN
-# ------------------------------------------------------------------
-
-def run_pipeline():
-    topic_entry = get_next_topic()
-    topic = topic_entry["topic"]
-    category = topic_entry["category"]
-
-    # Alternate ending style per run so both strategies keep getting
-    # fresh data logged against them for later comparison.
-    ending_style = random.choice(["loop", "joke"])
-
-    print(f"[1/4] Generating script for topic: {topic} (category={category}, ending={ending_style})")
-    recent_titles = get_recent_titles()
-    script = generate_script(topic, ending_style, recent_titles=recent_titles)
-    print(f"      Title: {script['title']}")
-    record_used_title(script["title"])
-
-    run_dir = OUTPUT_DIR / script["title"].replace(" ", "_")[:40]
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "script.json").write_text(json.dumps(script, indent=2))
-
-    print("[2/4] Synthesizing narration (Edge TTS)...")
-    audio_clips = synthesize_scene_audio(script["scenes"], run_dir)
-
-    print("[3/4] Fetching visuals (Pexels + Pollinations)...")
-    visuals = [
-        fetch_visual_for_scene(scene, i, run_dir)
-        for i, scene in enumerate(script["scenes"])
+# ----------------------------------------------------------------------
+# 3. YOUTUBE API AUTHENTICATION & DEDUPLICATION
+# ----------------------------------------------------------------------
+def get_youtube_client():
+    """Builds and returns the YouTube API service object."""
+    scopes = [
+        "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/youtube.readonly"
     ]
+    credentials = Credentials.from_authorized_user_file(YOUTUBE_TOKEN_PATH, scopes)
+    return build("youtube", "v3", credentials=credentials)
 
-    print("[4/5] Assembling final video...")
-    final_path = build_video(script, audio_clips, visuals, run_dir)
+def get_unused_topics(topic_pool, youtube):
+    """Queries your channel uploads and removes any topic present in existing titles."""
+    channel_res = youtube.channels().list(mine=True, part="contentDetails").execute()
+    uploads_id = channel_res['items'][0]['contentDetails']['relatedPlaylists']['uploads']
 
-    # 50/50 chance this run's video goes public vs. stays unlisted for
-    # manual review. Determined once per run so the print, upload call,
-    # and Supabase log all agree on the same value.
-    privacy_status = "public" if random.random() < PUBLIC_PUBLISH_CHANCE else "unlisted"
+    published_titles = []
+    next_page_token = None
 
-    print(f"[5/5] Uploading to YouTube as {privacy_status} + logging to dashboard...")
+    while True:
+        playlist_res = youtube.playlistItems().list(
+            playlistId=uploads_id,
+            part="snippet",
+            maxResults=50,
+            pageToken=next_page_token
+        ).execute()
+
+        for item in playlist_res.get("items", []):
+            published_titles.append(item["snippet"]["title"].lower())
+
+        next_page_token = playlist_res.get("nextPageToken")
+        if not next_page_token:
+            break
+
+    unused = []
+    for item in topic_pool:
+        topic_text = item["topic"].lower()
+        if not any(topic_text in title for title in published_titles):
+            unused.append(item)
+
+    return unused
+
+# ----------------------------------------------------------------------
+# 4. SCRIPT GENERATION (Groq / Llama 3.3)
+# ----------------------------------------------------------------------
+def generate_script(topic: str) -> str:
+    """Uses Groq (Llama 3.3 70B) to create a fast-paced YouTube Shorts script (<110 words)."""
+    prompt = f"""
+    Write a fast-paced, highly engaging script for a 30-second YouTube Short about: "{topic}".
+    Requirements:
+    - Start immediately with a strong hook sentence.
+    - Keep total script length under 110 words.
+    - No emojis, stage directions, or narration cues (like [Music Plays]).
+    - Output raw speakable text only.
+    """
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        max_completion_tokens=300
+    )
+    return response.choices[0].message.content.strip()
+
+# ----------------------------------------------------------------------
+# 5. VOICE GENERATION (Edge-TTS)
+# ----------------------------------------------------------------------
+async def generate_voiceover(text: str, output_path: str):
+    """Synthesizes speech using Microsoft Edge TTS."""
+    voice = "en-US-ChristopherNeural"
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output_path)
+
+# ----------------------------------------------------------------------
+# 6. VIDEO CREATION & RENDERING ENGINE (MoviePy)
+# ----------------------------------------------------------------------
+def render_video_short(audio_path: str, script_text: str, output_path: str):
+    """Combines background video, TTS audio, and timed subtitle overlay into a 9:16 short."""
+    audio = AudioFileClip(audio_path)
+    duration = audio.duration
+
+    # Use existing background video or fallback to dark canvas
+    if os.path.exists(BG_VIDEO_PATH):
+        bg_clip = VideoFileClip(BG_VIDEO_PATH)
+        if bg_clip.duration < duration:
+            bg_clip = bg_clip.loop(duration=duration)
+        else:
+            bg_clip = bg_clip.subclip(0, duration)
+        bg_clip = bg_clip.resize(height=1920) if bg_clip.h < 1920 else bg_clip
+        bg_clip = bg_clip.crop(x_center=bg_clip.w / 2, width=1080, height=1920)
+    else:
+        bg_clip = ColorClip(size=(1080, 1920), color=(15, 15, 20), duration=duration)
+
+    bg_clip = bg_clip.set_audio(audio)
+
+    # Subtitle Overlay Logic (Group words into sentence chunks)
+    words = script_text.split()
+    chunk_size = 5
+    chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    chunk_duration = duration / max(len(chunks), 1)
+
+    txt_clips = []
+    for idx, chunk in enumerate(chunks):
+        start_time = idx * chunk_duration
+        txt = (
+            TextClip(
+                chunk.upper(),
+                fontsize=55,
+                color="yellow",
+                font="Arial-Bold",
+                method="caption",
+                size=(900, None)
+            )
+            .set_position(("center", "center"))
+            .set_start(start_time)
+            .set_duration(chunk_duration)
+        )
+        txt_clips.append(txt)
+
+    final_video = CompositeVideoClip([bg_clip] + txt_clips)
+    final_video.write_videofile(
+        output_path,
+        fps=30,
+        codec="libx264",
+        audio_codec="aac",
+        threads=4
+    )
+
+    audio.close()
+    bg_clip.close()
+
+# ----------------------------------------------------------------------
+# 7. YOUTUBE UPLOAD PIPELINE
+# ----------------------------------------------------------------------
+def upload_to_youtube(youtube, video_path: str, topic: str, category: str):
+    """Executes YouTube API upload with tailored tags and metadata."""
+    title = f"{topic.title()} #Shorts"
+    if len(title) > 100:
+        title = title[:95] + "..."
+
     description = (
-        f"{script.get('hook', '')}\n\n"
-        f"{' '.join(script['hashtags'])}"
+        f"Mind-bending facts about {topic}.\n\n"
+        f"#shorts #{category} #facts #viral #didyouknow"
     )
-    upload_result = youtube_upload.upload_video(
-        file_path=str(final_path),
-        title=script["title"],
-        description=description,
-        tags=[h.replace("#", "") for h in script["hashtags"]],
-        privacy_status=privacy_status,
-    )
-    video_id = upload_result["id"]
-    thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
-    supabase_client.log_video(
-        youtube_id=video_id,
-        title=script["title"],
-        description=description,
-        hashtags=script["hashtags"],
-        thumbnail_url=thumbnail_url,
-        topic=topic,
-        status=privacy_status,
-    )
-    # NOTE: category and ending_style are tracked locally (printed above)
-    # but not yet logged to Supabase — log_video()'s current signature in
-    # supabase_client.py doesn't accept them. The category-weighting
-    # feature falls back to the seeded 55/45 split until that function is
-    # updated to store and return these fields.
+    body = {
+        "snippet": {
+            "title": title,
+            "description": description,
+            "tags": [topic, category, "shorts", "facts", "educational"],
+            "categoryId": "27"  # Education category
+        },
+        "status": {
+            "privacyStatus": "public",
+            "selfDeclaredMadeForKids": False
+        }
+    }
 
-    print(f"\nDone: {final_path}")
-    print(f"YouTube ({privacy_status}): https://youtu.be/{video_id}")
-    print("Review and publish from the dashboard.")
-    return final_path
+    media = MediaFileUpload(video_path, chunksize=-1, resumable=True, mimetype="video/mp4")
+    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+    
+    response = request.execute()
+    print(f"Upload Complete! Video ID: {response.get('id')}")
 
+# ----------------------------------------------------------------------
+# 8. MAIN EXECUTOR
+# ----------------------------------------------------------------------
+def main():
+    print("--- 1. Authenticating YouTube Client ---")
+    youtube = get_youtube_client()
+
+    print("--- 2. Checking Upload History & Deduplicating ---")
+    available_topics = get_unused_topics(TOPIC_POOL, youtube)
+    print(f"Unused Topics Remaining: {len(available_topics)} / {len(TOPIC_POOL)}")
+
+    if not available_topics:
+        print("All topics in the pool have already been uploaded!")
+        return
+
+    # Select random unused topic
+    selected = random.choice(available_topics)
+    topic = selected["topic"]
+    category = selected["category"]
+    print(f"Selected Topic: '{topic}' [{category}]")
+
+    print("--- 3. Generating Script with Groq (Llama 3.3 70B) ---")
+    script_text = generate_script(topic)
+    print(f"Generated Script:\n\"{script_text}\"\n")
+
+    print("--- 4. Synthesizing TTS Voiceover ---")
+    asyncio.run(generate_voiceover(script_text, TEMP_AUDIO))
+
+    print("--- 5. Rendering Video with MoviePy ---")
+    render_video_short(TEMP_AUDIO, script_text, OUTPUT_VIDEO)
+
+    print("--- 6. Uploading to YouTube Shorts ---")
+    upload_to_youtube(youtube, OUTPUT_VIDEO, topic, category)
+
+    print("--- Clean up temp files ---")
+    if os.path.exists(TEMP_AUDIO):
+        os.remove(TEMP_AUDIO)
+    if os.path.exists(OUTPUT_VIDEO):
+        os.remove(OUTPUT_VIDEO)
 
 if __name__ == "__main__":
-    run_pipeline()
+    main()
