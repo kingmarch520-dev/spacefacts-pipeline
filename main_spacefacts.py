@@ -298,10 +298,10 @@ def save_used_topic(topic_text):
         json.dump({"used_topics": list(used)}, f, indent=2)
 
 # ----------------------------------------------------------------------
-# 4. SCRIPT GENERATION (Groq / Llama 3.1 70B)
+# 4. SCRIPT GENERATION (Groq / Llama 3.1 8B Instant)
 # ----------------------------------------------------------------------
 def generate_script(topic: str) -> str:
-    """Uses Groq (Llama 3.1 70B) to generate short script."""
+    """Uses Groq (Llama 3.1 8B Instant) to generate short script."""
     prompt = f"""
     Write a fast-paced, highly engaging script for a 30-second YouTube Short about: "{topic}".
     Requirements:
@@ -311,7 +311,7 @@ def generate_script(topic: str) -> str:
     - Output raw speakable text only.
     """
     response = groq_client.chat.completions.create(
-        model="llama-3.1-70b-versatile",
+        model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
         max_completion_tokens=300
