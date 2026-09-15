@@ -1,34 +1,49 @@
 import os
 import sys
+import json
 import random
 import asyncio
 from groq import Groq
 import edge_tts
-from moviepy.editor import (
-    VideoFileClip,
-    AudioFileClip,
-    TextClip,
-    CompositeVideoClip,
-    ColorClip
-)
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 
+# --- MOVIEPY V1/V2 COMPATIBILITY IMPORT ---
+try:
+    from moviepy.editor import (
+        VideoFileClip,
+        AudioFileClip,
+        TextClip,
+        CompositeVideoClip,
+        ColorClip
+    )
+except ImportError:
+    from moviepy import (
+        VideoFileClip,
+        AudioFileClip,
+        TextClip,
+        CompositeVideoClip,
+        ColorClip
+    )
+
 # ----------------------------------------------------------------------
 # 1. CONFIGURATION & ENVIRONMENT SETUP
 # ----------------------------------------------------------------------
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "your-groq-api-key")
-YOUTUBE_TOKEN_PATH = os.getenv("YOUTUBE_TOKEN_PATH", "token.json")
-BG_VIDEO_PATH = "background.mp4"       # Default background video (1080x1920)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+YT_CLIENT_ID = os.getenv("YT_CLIENT_ID")
+YT_CLIENT_SECRET = os.getenv("YT_CLIENT_SECRET")
+YT_REFRESH_TOKEN = os.getenv("YT_REFRESH_TOKEN")
+
+STATE_FILE = "state_spacefacts.json"
+BG_VIDEO_PATH = "background.mp4"
 OUTPUT_VIDEO = "final_short.mp4"
 TEMP_AUDIO = "voiceover.mp3"
 
-# Initialize Groq Client
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ----------------------------------------------------------------------
-# 2. TOPIC POOL (200 Total Topics across 4 Categories)
+# 2. TOPIC POOL (200 Topics)
 # ----------------------------------------------------------------------
 TOPIC_POOL = [
     # --- SPACE / PHYSICS (50 topics) ---
@@ -244,50 +259,49 @@ TOPIC_POOL = [
 # 3. YOUTUBE API AUTHENTICATION & DEDUPLICATION
 # ----------------------------------------------------------------------
 def get_youtube_client():
-    """Builds and returns the YouTube API service object."""
-    scopes = [
-        "https://www.googleapis.com/auth/youtube.upload",
-        "https://www.googleapis.com/auth/youtube.readonly"
-    ]
-    credentials = Credentials.from_authorized_user_file(YOUTUBE_TOKEN_PATH, scopes)
+    """Builds YouTube API client using GitHub Actions Secrets or token.json."""
+    if YT_CLIENT_ID and YT_CLIENT_SECRET and YT_REFRESH_TOKEN:
+        credentials = Credentials(
+            None,
+            refresh_token=YT_REFRESH_TOKEN,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=YT_CLIENT_ID,
+            client_secret=YT_CLIENT_SECRET
+        )
+    elif os.path.exists("token.json"):
+        scopes = [
+            "https://www.googleapis.com/auth/youtube.upload",
+            "https://www.googleapis.com/auth/youtube.readonly"
+        ]
+        credentials = Credentials.from_authorized_user_file("token.json", scopes)
+    else:
+        raise ValueError("Missing YouTube credentials in environment variables or token.json.")
+
     return build("youtube", "v3", credentials=credentials)
 
-def get_unused_topics(topic_pool, youtube):
-    """Queries your channel uploads and removes any topic present in existing titles."""
-    channel_res = youtube.channels().list(mine=True, part="contentDetails").execute()
-    uploads_id = channel_res['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+def get_used_topics():
+    """Loads uploaded topics from state_spacefacts.json."""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+                return set(data.get("used_topics", []))
+        except Exception:
+            return set()
+    return set()
 
-    published_titles = []
-    next_page_token = None
-
-    while True:
-        playlist_res = youtube.playlistItems().list(
-            playlistId=uploads_id,
-            part="snippet",
-            maxResults=50,
-            pageToken=next_page_token
-        ).execute()
-
-        for item in playlist_res.get("items", []):
-            published_titles.append(item["snippet"]["title"].lower())
-
-        next_page_token = playlist_res.get("nextPageToken")
-        if not next_page_token:
-            break
-
-    unused = []
-    for item in topic_pool:
-        topic_text = item["topic"].lower()
-        if not any(topic_text in title for title in published_titles):
-            unused.append(item)
-
-    return unused
+def save_used_topic(topic_text):
+    """Saves used topic to state_spacefacts.json."""
+    used = get_used_topics()
+    used.add(topic_text.lower())
+    with open(STATE_FILE, "w") as f:
+        json.dump({"used_topics": list(used)}, f, indent=2)
 
 # ----------------------------------------------------------------------
 # 4. SCRIPT GENERATION (Groq / Llama 3.3)
 # ----------------------------------------------------------------------
 def generate_script(topic: str) -> str:
-    """Uses Groq (Llama 3.3 70B) to create a fast-paced YouTube Shorts script (<110 words)."""
+    """Uses Groq (Llama 3.3 70B) to generate short script."""
     prompt = f"""
     Write a fast-paced, highly engaging script for a 30-second YouTube Short about: "{topic}".
     Requirements:
@@ -308,20 +322,19 @@ def generate_script(topic: str) -> str:
 # 5. VOICE GENERATION (Edge-TTS)
 # ----------------------------------------------------------------------
 async def generate_voiceover(text: str, output_path: str):
-    """Synthesizes speech using Microsoft Edge TTS."""
+    """Synthesizes voice audio."""
     voice = "en-US-ChristopherNeural"
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_path)
 
 # ----------------------------------------------------------------------
-# 6. VIDEO CREATION & RENDERING ENGINE (MoviePy)
+# 6. VIDEO RENDERING ENGINE (MoviePy)
 # ----------------------------------------------------------------------
 def render_video_short(audio_path: str, script_text: str, output_path: str):
-    """Combines background video, TTS audio, and timed subtitle overlay into a 9:16 short."""
+    """Renders 9:16 short video."""
     audio = AudioFileClip(audio_path)
     duration = audio.duration
 
-    # Use existing background video or fallback to dark canvas
     if os.path.exists(BG_VIDEO_PATH):
         bg_clip = VideoFileClip(BG_VIDEO_PATH)
         if bg_clip.duration < duration:
@@ -335,7 +348,7 @@ def render_video_short(audio_path: str, script_text: str, output_path: str):
 
     bg_clip = bg_clip.set_audio(audio)
 
-    # Subtitle Overlay Logic (Group words into sentence chunks)
+    # Subtitle Overlay Logic
     words = script_text.split()
     chunk_size = 5
     chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
@@ -349,7 +362,7 @@ def render_video_short(audio_path: str, script_text: str, output_path: str):
                 chunk.upper(),
                 fontsize=55,
                 color="yellow",
-                font="Arial-Bold",
+                font="DejaVu-Sans-Bold",
                 method="caption",
                 size=(900, None)
             )
@@ -375,7 +388,7 @@ def render_video_short(audio_path: str, script_text: str, output_path: str):
 # 7. YOUTUBE UPLOAD PIPELINE
 # ----------------------------------------------------------------------
 def upload_to_youtube(youtube, video_path: str, topic: str, category: str):
-    """Executes YouTube API upload with tailored tags and metadata."""
+    """Uploads compiled video to YouTube."""
     title = f"{topic.title()} #Shorts"
     if len(title) > 100:
         title = title[:95] + "..."
@@ -390,7 +403,7 @@ def upload_to_youtube(youtube, video_path: str, topic: str, category: str):
             "title": title,
             "description": description,
             "tags": [topic, category, "shorts", "facts", "educational"],
-            "categoryId": "27"  # Education category
+            "categoryId": "27"
         },
         "status": {
             "privacyStatus": "public",
@@ -411,34 +424,37 @@ def main():
     print("--- 1. Authenticating YouTube Client ---")
     youtube = get_youtube_client()
 
-    print("--- 2. Checking Upload History & Deduplicating ---")
-    available_topics = get_unused_topics(TOPIC_POOL, youtube)
+    print("--- 2. Checking Topic Pool ---")
+    used_topics = get_used_topics()
+    available_topics = [item for item in TOPIC_POOL if item["topic"].lower() not in used_topics]
     print(f"Unused Topics Remaining: {len(available_topics)} / {len(TOPIC_POOL)}")
 
     if not available_topics:
-        print("All topics in the pool have already been uploaded!")
+        print("All topics in the pool have been uploaded!")
         return
 
-    # Select random unused topic
     selected = random.choice(available_topics)
     topic = selected["topic"]
     category = selected["category"]
     print(f"Selected Topic: '{topic}' [{category}]")
 
-    print("--- 3. Generating Script with Groq (Llama 3.3 70B) ---")
+    print("--- 3. Generating Script with Groq ---")
     script_text = generate_script(topic)
-    print(f"Generated Script:\n\"{script_text}\"\n")
+    print(f"Script:\n\"{script_text}\"\n")
 
-    print("--- 4. Synthesizing TTS Voiceover ---")
+    print("--- 4. Generating TTS Voiceover ---")
     asyncio.run(generate_voiceover(script_text, TEMP_AUDIO))
 
-    print("--- 5. Rendering Video with MoviePy ---")
+    print("--- 5. Rendering Video Short ---")
     render_video_short(TEMP_AUDIO, script_text, OUTPUT_VIDEO)
 
-    print("--- 6. Uploading to YouTube Shorts ---")
+    print("--- 6. Uploading to YouTube ---")
     upload_to_youtube(youtube, OUTPUT_VIDEO, topic, category)
 
-    print("--- Clean up temp files ---")
+    print("--- 7. Saving State ---")
+    save_used_topic(topic)
+
+    # Cleanup temp files
     if os.path.exists(TEMP_AUDIO):
         os.remove(TEMP_AUDIO)
     if os.path.exists(OUTPUT_VIDEO):
