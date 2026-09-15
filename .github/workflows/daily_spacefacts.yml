@@ -1,4 +1,4 @@
-ame: Space Facts Automated Pipeline
+Name: Space Facts Automated Pipeline
 
 on:
   schedule:
