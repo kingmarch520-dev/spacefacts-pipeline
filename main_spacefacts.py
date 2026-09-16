@@ -40,10 +40,14 @@ VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
    order each time it completes a full pass — genuinely no repeats
    until every topic in that category has been used once.
 6. Topic pool expanded from 48 to 81 topics across the 4 categories.
-7. Added a recent-titles memory (last 15, across all categories) fed
-   into the script prompt so Gemini avoids producing something that
+7. Recent-titles memory bumped from 15 to 40 (across all categories),
+   fed into the script prompt so Gemini avoids producing something that
    reads like a near-duplicate of a recent video even when the
    underlying topic string is technically different.
+8. (Considered switching script generation to Claude for less-flat
+   scripts, then decided to stay on Gemini for now — kept the
+   recent-titles anti-duplication and retry logic below regardless,
+   since those help either way.)
 4. Model stays on gemini-3.6-flash (current, correct, GA as of
    July 2026) — do not swap this back to gemini-1.5-flash or any
    1.x model, those are permanently shut down.
@@ -54,7 +58,8 @@ VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
    default font fallback) — set CAPTION_FONT_PATH below or captions
    will crash the build step.
 
-REQUIRED INSTALLS (run first in Colab):
+REQUIRED INSTALLS (run first in Colab, and update your GitHub Actions
+workflow's pip install line to match):
     !pip install google-generativeai edge-tts moviepy pillow requests --quiet
 
 REQUIRED API KEYS (set as Colab secrets or env vars):
@@ -321,7 +326,7 @@ def get_next_topic():
       you get variety in the *sequence* too, not the same fixed
       order every cycle, while still guaranteeing every topic in the
       category is used exactly once before any repeat.
-    - state["recent_titles"] keeps the last 15 generated titles across
+    - state["recent_titles"] keeps the last 40 generated titles across
       ALL categories, fed into the script prompt (see generate_script)
       so Gemini avoids producing something that reads like a near-
       duplicate of a recent video even when the underlying topic
@@ -365,7 +370,7 @@ def record_used_title(title: str):
     state = load_state()
     recent = state.get("recent_titles", [])
     recent.append(title)
-    state["recent_titles"] = recent[-15:]
+    state["recent_titles"] = recent[-40:]
     save_state(state)
 
 def get_recent_titles() -> list:
@@ -490,10 +495,6 @@ Topic: {topic}
 """
 
 def generate_script(topic: str, ending_style: str, recent_titles: list = None) -> dict:
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-3.6-flash")
-
     if recent_titles:
         titles_list = "\n".join(f"- {t}" for t in recent_titles)
         recent_titles_block = (
@@ -510,6 +511,11 @@ def generate_script(topic: str, ending_style: str, recent_titles: list = None) -
         ending_style=ending_style,
         recent_titles_block=recent_titles_block,
     )
+
+    import google.generativeai as genai
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-3.6-flash")
+
     response = model.generate_content(
         prompt,
         generation_config={"response_mime_type": "application/json"},
@@ -550,6 +556,28 @@ def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
 # 3. VISUALS — Pexels for literal, Pollinations for abstract
 # ------------------------------------------------------------------
 
+def retry_with_backoff(fn, *args, retries=3, base_delay=3, **kwargs):
+    """
+    Calls fn(*args, **kwargs), retrying on failure with exponential
+    backoff (3s, 6s, 12s by default). Used to wrap flaky third-party
+    calls (Pollinations, Pexels) that occasionally return a transient
+    500/503 — without this, one bad response from a free external
+    service kills the entire run instead of just trying again.
+    Re-raises the last exception if all retries are exhausted.
+    """
+    import time
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if attempt < retries - 1:
+                delay = base_delay * (2 ** attempt)
+                print(f"      (retrying after error: {e} — waiting {delay}s)")
+                time.sleep(delay)
+    raise last_exc
+
 def fetch_pexels_video(query: str, out_path: Path) -> Path | None:
     headers = {"Authorization": PEXELS_API_KEY}
     url = "https://api.pexels.com/videos/search"
@@ -569,7 +597,7 @@ def fetch_pexels_video(query: str, out_path: Path) -> Path | None:
     out_path.write_bytes(video_data)
     return out_path
 
-def fetch_pollinations_image(prompt: str, out_path: Path) -> Path:
+def _fetch_pollinations_image_once(prompt: str, out_path: Path) -> Path:
     """Free, no-key AI image generation for abstract concepts.
     Verifies the response is actually an image before saving, so a
     rate-limit/error page from Pollinations can't silently become a
@@ -590,6 +618,12 @@ def fetch_pollinations_image(prompt: str, out_path: Path) -> Path:
 
     out_path.write_bytes(r.content)
     return out_path
+
+def fetch_pollinations_image(prompt: str, out_path: Path) -> Path:
+    """Retries _fetch_pollinations_image_once up to 3 times with
+    backoff — Pollinations is free and occasionally returns a
+    transient 500, which used to kill the whole run."""
+    return retry_with_backoff(_fetch_pollinations_image_once, prompt, out_path)
 
 def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
     if scene["visual_type"] == "literal":
