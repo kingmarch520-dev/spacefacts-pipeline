@@ -57,6 +57,11 @@ VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
 6. TextClip now requires an explicit font path (moviepy 2.x has no
    default font fallback) — set CAPTION_FONT_PATH below or captions
    will crash the build step.
+7. Pollinations failures no longer kill the whole run. After retries
+   are exhausted, fetch_pollinations_image() now falls back to a
+   locally-generated placeholder image instead of raising — a
+   transient 500 from a free third-party service can no longer take
+   down an otherwise-successful video.
 
 REQUIRED INSTALLS (run first in Colab, and update your GitHub Actions
 workflow's pip install line to match):
@@ -365,7 +370,7 @@ def get_next_topic():
 def record_used_title(title: str):
     """Appends a generated title to state so future prompts can avoid
     producing near-duplicates of recently made videos. Keeps only the
-    most recent 15 — enough to catch short-term repetition without
+    most recent 40 — enough to catch short-term repetition without
     the prompt growing unbounded."""
     state = load_state()
     recent = state.get("recent_titles", [])
@@ -375,10 +380,6 @@ def record_used_title(title: str):
 
 def get_recent_titles() -> list:
     return load_state().get("recent_titles", [])
-
-    state["index"] = idx + 1
-    save_state(state)
-    return topic_entry
 
 # ------------------------------------------------------------------
 # 1. SCRIPT GENERATION (Gemini) — scene-segmented, hook-engineered
@@ -619,11 +620,53 @@ def _fetch_pollinations_image_once(prompt: str, out_path: Path) -> Path:
     out_path.write_bytes(r.content)
     return out_path
 
+def _generate_fallback_image(prompt: str, out_path: Path) -> Path:
+    """Last-resort visual when Pollinations fails after all retries.
+    Renders a simple dark gradient card with the concept text overlaid
+    locally (no network call, so it can't fail the same way), so the
+    scene still has something on screen instead of crashing the whole
+    run. Not as good as a real AI image, but keeps the pipeline alive
+    end to end and still produces a usable video."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (VIDEO_W, VIDEO_H), color=(10, 10, 20))
+    draw = ImageDraw.Draw(img)
+
+    # simple vertical gradient background
+    for y in range(VIDEO_H):
+        shade = int(10 + (y / VIDEO_H) * 40)
+        draw.line([(0, y), (VIDEO_W, y)], fill=(shade, shade, shade + 15))
+
+    try:
+        font = ImageFont.truetype(CAPTION_FONT_PATH, 60)
+    except Exception:
+        font = ImageFont.load_default()
+
+    # wrap the prompt text roughly so it doesn't run off-canvas
+    import textwrap
+    wrapped = textwrap.fill(prompt, width=28)
+    draw.multiline_text(
+        (80, VIDEO_H // 2 - 150),
+        wrapped,
+        fill=(220, 220, 220),
+        font=font,
+        spacing=16,
+    )
+
+    img.save(out_path)
+    return out_path
+
 def fetch_pollinations_image(prompt: str, out_path: Path) -> Path:
     """Retries _fetch_pollinations_image_once up to 3 times with
-    backoff — Pollinations is free and occasionally returns a
-    transient 500, which used to kill the whole run."""
-    return retry_with_backoff(_fetch_pollinations_image_once, prompt, out_path)
+    backoff. If Pollinations is still failing after that (e.g. a
+    persistent 500 on their end), falls back to a locally-generated
+    placeholder instead of raising — a flaky free third-party service
+    can no longer take down an otherwise-successful run."""
+    try:
+        return retry_with_backoff(_fetch_pollinations_image_once, prompt, out_path)
+    except Exception as e:
+        print(f"      (Pollinations failed after retries — using fallback image: {e})")
+        return _generate_fallback_image(prompt, out_path)
 
 def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
     if scene["visual_type"] == "literal":
