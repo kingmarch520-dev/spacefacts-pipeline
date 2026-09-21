@@ -62,6 +62,15 @@ VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
    locally-generated placeholder image instead of raising — a
    transient 500 from a free third-party service can no longer take
    down an otherwise-successful video.
+8. Gemini script generation is now wrapped in the same
+   retry_with_backoff() helper already used for Pollinations/Pexels.
+   Previously a single transient error (e.g. a 504 DEADLINE_EXCEEDED
+   from Gemini's servers) killed the entire run immediately with no
+   second attempt, even though the retry infrastructure to handle it
+   already existed elsewhere in this file. Now it gets 3 attempts
+   (5s, 10s, 20s backoff) before the run actually fails. Note this
+   does NOT help with quota-exhaustion errors (RESOURCE_EXHAUSTED) —
+   those need a real time gap or a paid tier, not retries.
 
 REQUIRED INSTALLS (run first in Colab, and update your GitHub Actions
 workflow's pip install line to match):
@@ -517,10 +526,21 @@ def generate_script(topic: str, ending_style: str, recent_titles: list = None) -
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel("gemini-3.6-flash")
 
-    response = model.generate_content(
-        prompt,
-        generation_config={"response_mime_type": "application/json"},
-    )
+    # Wrapped in the same retry_with_backoff() helper already used for
+    # Pollinations/Pexels below. Previously this call had zero retry
+    # protection, so a single transient error from Gemini's servers
+    # (e.g. a 504 DEADLINE_EXCEEDED under load) killed the entire run
+    # immediately. Now it gets 3 attempts (5s, 10s, 20s backoff) before
+    # giving up. This does NOT help with quota-exhaustion errors
+    # (RESOURCE_EXHAUSTED) — those need a real time gap or a paid tier,
+    # not retries, so it will still raise promptly in that case.
+    def _call_gemini():
+        return model.generate_content(
+            prompt,
+            generation_config={"response_mime_type": "application/json"},
+        )
+
+    response = retry_with_backoff(_call_gemini, retries=3, base_delay=5)
 
     data = json.loads(response.text)
 
@@ -561,9 +581,9 @@ def retry_with_backoff(fn, *args, retries=3, base_delay=3, **kwargs):
     """
     Calls fn(*args, **kwargs), retrying on failure with exponential
     backoff (3s, 6s, 12s by default). Used to wrap flaky third-party
-    calls (Pollinations, Pexels) that occasionally return a transient
-    500/503 — without this, one bad response from a free external
-    service kills the entire run instead of just trying again.
+    calls (Pollinations, Pexels, Gemini) that occasionally return a
+    transient 500/503/504 — without this, one bad response from a
+    flaky service kills the entire run instead of just trying again.
     Re-raises the last exception if all retries are exhausted.
     """
     import time
