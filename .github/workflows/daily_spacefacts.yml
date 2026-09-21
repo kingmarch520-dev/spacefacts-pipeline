@@ -2,8 +2,13 @@ name: Space Facts Automated Pipeline
 
 on:
   schedule:
-    # Runs every 4 hours (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC) -> 6 uploads/day
-    - cron: "0 */4 * * *"
+    # Times below are UTC. Local time is GMT+2 (CAT).
+    - cron: "0 16 * * *"   # 18:00 CAT - evening peak begins
+    - cron: "0 18 * * *"   # 20:00 CAT - evening peak
+    - cron: "30 20 * * *"  # 22:30 CAT - evening peak
+    - cron: "0 23 * * *"   # 01:00 CAT - early morning pocket
+    - cron: "0 6 * * *"    # 08:00 CAT - morning
+    - cron: "0 10 * * *"   # 12:00 CAT - weakest slot, kept for daytime presence
   workflow_dispatch: {}  # Manual trigger option
 
 # Cancels older in-progress runs if a new run is triggered manually
