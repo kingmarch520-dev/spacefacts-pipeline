@@ -44,6 +44,22 @@ VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
    fed into the script prompt so Gemini avoids producing something that
    reads like a near-duplicate of a recent video even when the
    underlying topic string is technically different.
+9. Swapped TTS voices for higher-quality ones — added Microsoft's
+   newer "Multilingual" neural voices (Emma/Andrew/Ava), which sound
+   noticeably less robotic than the older standard voices. Kept
+   en-GB-RyanNeural since it's independently well-regarded too.
+10. Added optional background music: drop royalty-free .mp3 files in
+    a "bgm" folder at the repo root, and add_background_music() mixes
+    one in at low volume under the narration. No files there = no
+    music, nothing breaks.
+11. Pollinations failures no longer kill the whole run. After retries
+    are exhausted, fetch_pollinations_image() falls back to a
+    locally-generated placeholder image instead of raising.
+12. Gemini script generation is now wrapped in retry_with_backoff too
+    (previously only Pollinations/Pexels had this) — a single
+    transient error from Gemini's servers no longer kills the run
+    immediately. Does not help with quota-exhaustion errors, which
+    need a real time gap rather than a retry.
 8. (Considered switching script generation to Claude for less-flat
    scripts, then decided to stay on Gemini for now — kept the
    recent-titles anti-duplication and retry logic below regardless,
@@ -57,20 +73,6 @@ VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
 6. TextClip now requires an explicit font path (moviepy 2.x has no
    default font fallback) — set CAPTION_FONT_PATH below or captions
    will crash the build step.
-7. Pollinations failures no longer kill the whole run. After retries
-   are exhausted, fetch_pollinations_image() now falls back to a
-   locally-generated placeholder image instead of raising — a
-   transient 500 from a free third-party service can no longer take
-   down an otherwise-successful video.
-8. Gemini script generation is now wrapped in the same
-   retry_with_backoff() helper already used for Pollinations/Pexels.
-   Previously a single transient error (e.g. a 504 DEADLINE_EXCEEDED
-   from Gemini's servers) killed the entire run immediately with no
-   second attempt, even though the retry infrastructure to handle it
-   already existed elsewhere in this file. Now it gets 3 attempts
-   (5s, 10s, 20s backoff) before the run actually fails. Note this
-   does NOT help with quota-exhaustion errors (RESOURCE_EXHAUSTED) —
-   those need a real time gap or a paid tier, not retries.
 
 REQUIRED INSTALLS (run first in Colab, and update your GitHub Actions
 workflow's pip install line to match):
@@ -104,6 +106,13 @@ STATE_FILE = Path("state_spacefacts.json")
 OUTPUT_DIR = Path("output_spacefacts")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+# Background music: drop royalty-free instrumental .mp3 files in a
+# folder called "bgm" at the repo root (same level as this script).
+# One is picked at random per video and mixed in at low volume under
+# the narration. No files here = no music, script just skips it
+# silently rather than failing.
+BGM_DIR = Path(__file__).parent / "bgm"
+
 VIDEO_W, VIDEO_H = 1080, 1920  # vertical shorts
 
 # moviepy 2.x TextClip has no built-in font fallback — this points at
@@ -113,10 +122,14 @@ CAPTION_FONT_PATH = str(Path(__file__).parent / "Anton-Regular.ttf")
 
 # Rotate between a small, consistent set of Edge TTS voices.
 TTS_VOICES = [
-    "en-US-GuyNeural",       # calm male
-    "en-GB-RyanNeural",      # measured British male
-    "en-US-JennyNeural",     # warm female, explainer tone
-    "en-AU-WilliamNeural",   # relaxed Australian male
+    "en-GB-RyanNeural",              # widely regarded as one of the
+                                      # least robotic-sounding standard
+                                      # Edge TTS voices
+    "en-US-EmmaMultilingualNeural",  # newer "Multilingual" model —
+                                      # noticeably more natural prosody
+                                      # than the older standard voices
+    "en-US-AndrewMultilingualNeural",
+    "en-US-AvaMultilingualNeural",
 ]
 
 # Seeded from your actual YouTube Studio "Top content" numbers
@@ -379,7 +392,7 @@ def get_next_topic():
 def record_used_title(title: str):
     """Appends a generated title to state so future prompts can avoid
     producing near-duplicates of recently made videos. Keeps only the
-    most recent 40 — enough to catch short-term repetition without
+    most recent 15 — enough to catch short-term repetition without
     the prompt growing unbounded."""
     state = load_state()
     recent = state.get("recent_titles", [])
@@ -389,6 +402,10 @@ def record_used_title(title: str):
 
 def get_recent_titles() -> list:
     return load_state().get("recent_titles", [])
+
+    state["index"] = idx + 1
+    save_state(state)
+    return topic_entry
 
 # ------------------------------------------------------------------
 # 1. SCRIPT GENERATION (Gemini) — scene-segmented, hook-engineered
@@ -526,21 +543,30 @@ def generate_script(topic: str, ending_style: str, recent_titles: list = None) -
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel("gemini-3.6-flash")
 
-    # Wrapped in the same retry_with_backoff() helper already used for
-    # Pollinations/Pexels below. Previously this call had zero retry
-    # protection, so a single transient error from Gemini's servers
-    # (e.g. a 504 DEADLINE_EXCEEDED under load) killed the entire run
-    # immediately. Now it gets 3 attempts (5s, 10s, 20s backoff) before
-    # giving up. This does NOT help with quota-exhaustion errors
-    # (RESOURCE_EXHAUSTED) — those need a real time gap or a paid tier,
-    # not retries, so it will still raise promptly in that case.
+    # Wrapped in retry_with_backoff for genuinely transient errors
+    # (e.g. a 504 DEADLINE_EXCEEDED under load), but explicitly does
+    # NOT retry on quota-exhaustion (RESOURCE_EXHAUSTED / 429) errors —
+    # those need a real time gap (minutes), not a 5-20s backoff, so
+    # retrying just burns 3 requests against the same per-minute quota
+    # for nothing. On a quota error, this fails fast after 1 attempt
+    # instead of 3, and the next scheduled run a few hours later will
+    # have a fresh quota window.
     def _call_gemini():
         return model.generate_content(
             prompt,
             generation_config={"response_mime_type": "application/json"},
         )
 
-    response = retry_with_backoff(_call_gemini, retries=3, base_delay=5)
+    def _is_transient_gemini_error(e) -> bool:
+        msg = str(e)
+        return not any(
+            marker in msg
+            for marker in ("RESOURCE_EXHAUSTED", "429", "quota")
+        )
+
+    response = retry_with_backoff(
+        _call_gemini, retries=3, base_delay=5, should_retry=_is_transient_gemini_error
+    )
 
     data = json.loads(response.text)
 
@@ -577,14 +603,24 @@ def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
 # 3. VISUALS — Pexels for literal, Pollinations for abstract
 # ------------------------------------------------------------------
 
-def retry_with_backoff(fn, *args, retries=3, base_delay=3, **kwargs):
+def retry_with_backoff(fn, *args, retries=3, base_delay=3, should_retry=None, **kwargs):
     """
     Calls fn(*args, **kwargs), retrying on failure with exponential
     backoff (3s, 6s, 12s by default). Used to wrap flaky third-party
     calls (Pollinations, Pexels, Gemini) that occasionally return a
     transient 500/503/504 — without this, one bad response from a
     flaky service kills the entire run instead of just trying again.
-    Re-raises the last exception if all retries are exhausted.
+
+    should_retry: optional function(exception) -> bool. If provided
+    and it returns False, fails immediately on the first attempt
+    instead of burning through all `retries` — used for errors where
+    retrying within seconds can't possibly help (e.g. a per-minute
+    rate limit that needs 30-60s to clear, not 5-10s). Without this,
+    a single rate-limited call would cost 3 wasted requests against
+    the same quota window instead of 1.
+
+    Re-raises the last exception if all retries are exhausted (or if
+    should_retry rejects the error on the first attempt).
     """
     import time
     last_exc = None
@@ -593,6 +629,9 @@ def retry_with_backoff(fn, *args, retries=3, base_delay=3, **kwargs):
             return fn(*args, **kwargs)
         except Exception as e:
             last_exc = e
+            if should_retry is not None and not should_retry(e):
+                print(f"      (not retrying — error isn't transient: {e})")
+                raise
             if attempt < retries - 1:
                 delay = base_delay * (2 ** attempt)
                 print(f"      (retrying after error: {e} — waiting {delay}s)")
@@ -648,6 +687,7 @@ def _generate_fallback_image(prompt: str, out_path: Path) -> Path:
     run. Not as good as a real AI image, but keeps the pipeline alive
     end to end and still produces a usable video."""
     from PIL import Image, ImageDraw, ImageFont
+    import textwrap
 
     img = Image.new("RGB", (VIDEO_W, VIDEO_H), color=(10, 10, 20))
     draw = ImageDraw.Draw(img)
@@ -662,8 +702,6 @@ def _generate_fallback_image(prompt: str, out_path: Path) -> Path:
     except Exception:
         font = ImageFont.load_default()
 
-    # wrap the prompt text roughly so it doesn't run off-canvas
-    import textwrap
     wrapped = textwrap.fill(prompt, width=28)
     draw.multiline_text(
         (80, VIDEO_H // 2 - 150),
@@ -705,6 +743,38 @@ def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
 # ------------------------------------------------------------------
 # 4. ASSEMBLY (moviepy)
 # ------------------------------------------------------------------
+
+def add_background_music(final_clip):
+    """
+    Layers a random royalty-free track from BGM_DIR under the
+    narration at low volume. If no .mp3 files exist in BGM_DIR,
+    returns the clip unchanged — this is optional, not required.
+    """
+    from moviepy import AudioFileClip, CompositeAudioClip, vfx
+
+    if not BGM_DIR.exists():
+        return final_clip
+
+    bgm_files = list(BGM_DIR.glob("*.mp3"))
+    if not bgm_files:
+        return final_clip
+
+    bgm_path = random.choice(bgm_files)
+    bgm = AudioFileClip(str(bgm_path))
+
+    if bgm.duration < final_clip.duration:
+        bgm = bgm.with_effects([vfx.Loop(duration=final_clip.duration)])
+    else:
+        bgm = bgm.subclipped(0, final_clip.duration)
+
+    # Keep it low — this should sit under the narration, not compete
+    # with it. 10% of original volume is a conservative starting
+    # point; raise toward 0.15-0.18 if it feels too quiet, but test
+    # a few videos before going much higher.
+    bgm = bgm.with_effects([vfx.MultiplyVolume(0.10)])
+
+    combined_audio = CompositeAudioClip([final_clip.audio, bgm])
+    return final_clip.with_audio(combined_audio)
 
 def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -> Path:
     from moviepy import (
@@ -755,6 +825,7 @@ def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -
         scene_clips.append(composite)
 
     final = concatenate_videoclips(scene_clips, method="compose")
+    final = add_background_music(final)
 
     out_path = run_dir / "final_video.mp4"
     final.write_videofile(
