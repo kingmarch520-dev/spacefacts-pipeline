@@ -3,15 +3,13 @@ name: Space Facts Automated Pipeline
 on:
   schedule:
     # Times below are UTC. Local time is GMT+2 (CAT).
-    - cron: "0 16 * * *"   # 18:00 CAT - evening peak begins
-    - cron: "0 18 * * *"   # 20:00 CAT - evening peak
-    - cron: "30 20 * * *"  # 22:30 CAT - evening peak
-    - cron: "0 23 * * *"   # 01:00 CAT - early morning pocket
+    # Trimmed from 6 runs/day to 2 — concentrating the fixed viewer
+    # pool on fewer, sharper videos instead of spreading it thin
+    # across a volume of near-identical performers.
+    - cron: "0 16 * * *"   # 18:00 CAT - evening peak
     - cron: "0 6 * * *"    # 08:00 CAT - morning
-    - cron: "0 10 * * *"   # 12:00 CAT - weakest slot, kept for daytime presence
   workflow_dispatch: {}  # Manual trigger option
 
-# Cancels older in-progress runs if a new run is triggered manually
 concurrency:
   group: spacefacts-pipeline
   cancel-in-progress: true
@@ -36,7 +34,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install google-generativeai edge-tts moviepy pillow requests google-auth-oauthlib
+          pip install google-generativeai edge-tts moviepy pillow requests numpy google-auth-oauthlib
 
       - name: Run pipeline
         env:
