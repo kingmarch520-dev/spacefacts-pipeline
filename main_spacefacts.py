@@ -8,10 +8,7 @@ TWO LANES ONLY — space/physics and history.
 
 TARGET LENGTH: 20-30 seconds (60-75 words, 4 scenes).
 
-GEMINI MODEL CHAIN: tries each model in order. Each has its own
-quota pool, so when one is exhausted the next usually has room.
-Model-unavailable (404) errors also fall through to the next model
-instead of failing the run.
+GEMINI MODEL: gemini-3.8-flash only.
 
 REQUIRED INSTALLS (Colab + GitHub Actions pip line):
     !pip install google-generativeai edge-tts moviepy pillow requests --quiet
@@ -62,16 +59,8 @@ CATEGORY_WEIGHTS = {
 
 PUBLIC_PUBLISH_CHANCE = 0.5
 
-# Models tried in order. Each model has its own per-project quota
-# pool, so when one is exhausted the next usually has room.
-# gemini-3.8-flash is the current model Google's own 404 messages
-# point new accounts to. The older ones are kept as fallbacks in
-# case 3.8 is temporarily overloaded.
-GEMINI_MODEL_CHAIN = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-]
+# Single model. No fallback chain.
+GEMINI_MODEL = "gemini-3.8-flash"
 
 # ------------------------------------------------------------------
 # INSPIRATION TRANSCRIPTS
@@ -198,13 +187,6 @@ def record_used_title(title):
 
 
 def get_next_topic():
-    """
-    Per-category round-robin. Each category tracks its own position
-    independently; "order" is a shuffled permutation regenerated
-    fresh each time a full pass completes, so you get variety in the
-    sequence too while still guaranteeing every topic is used
-    exactly once before any repeat.
-    """
     state = load_state()
     state.setdefault("category_progress", {})
 
@@ -405,20 +387,8 @@ def _is_quota_error(e):
     )
 
 
-def _is_model_unavailable_error(e):
-    """New accounts can't use older models — Google returns 404
-    NOT_FOUND instead of a quota error. Treat as 'skip to next model'
-    rather than a hard fail."""
-    msg = str(e)
-    return "NOT_FOUND" in msg or "no longer available" in msg
-
-
 def _is_transient_gemini_error(e):
-    """Non-quota, non-unavailable errors (5xx, network) get fast
-    retries; everything else bubbles up to the model chain."""
-    if _is_quota_error(e) or _is_model_unavailable_error(e):
-        return False
-    return True
+    return not _is_quota_error(e)
 
 
 def _extract_retry_delay(e):
@@ -432,9 +402,9 @@ def _is_daily_quota_error(e):
 
 def _call_gemini_with_quota_fallback(call_fn):
     """
-    Runs call_fn(). On a per-minute quota error, sleeps the delay
-    Gemini hints + buffer, retries once. On a per-day quota error,
-    raises immediately so the model chain can try the next model.
+    On a per-minute quota error, sleeps the delay Gemini hints +
+    buffer and retries once. On a per-day quota error, raises
+    immediately — no amount of sleeping fixes a spent daily budget.
     """
     try:
         return call_fn()
@@ -499,38 +469,21 @@ def generate_script(topic, ending_style, recent_titles=None):
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
 
-    def _generate_with_model(model_name):
-        model = genai.GenerativeModel(model_name)
+    print(f"      (using model: {GEMINI_MODEL})")
+    model = genai.GenerativeModel(GEMINI_MODEL)
 
-        def _call():
-            return model.generate_content(
-                prompt,
-                generation_config={"response_mime_type": "application/json"},
-            )
-
-        return _call_gemini_with_quota_fallback(
-            lambda: retry_with_backoff(
-                _call, retries=3, base_delay=5,
-                should_retry=_is_transient_gemini_error,
-            )
+    def _call():
+        return model.generate_content(
+            prompt,
+            generation_config={"response_mime_type": "application/json"},
         )
 
-    response = None
-    last_error = None
-    for model_name in GEMINI_MODEL_CHAIN:
-        try:
-            print(f"      (trying model: {model_name})")
-            response = _generate_with_model(model_name)
-            break
-        except Exception as e:
-            if not (_is_quota_error(e) or _is_model_unavailable_error(e)):
-                raise
-            last_error = e
-            print(f"      ({model_name} unavailable — trying next)")
-            continue
-
-    if response is None:
-        raise last_error or RuntimeError("all Gemini models exhausted")
+    response = _call_gemini_with_quota_fallback(
+        lambda: retry_with_backoff(
+            _call, retries=3, base_delay=5,
+            should_retry=_is_transient_gemini_error,
+        )
+    )
 
     data = json.loads(response.text)
 
