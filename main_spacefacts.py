@@ -29,7 +29,8 @@ REQUIRED API KEYS (env vars or Colab secrets):
     Pollinations needs NO KEY.
 ==================================================================
 """
-
+def run_pipeline():
+    print(f"DEBUG — key prefix: {GEMINI_API_KEY[:8]}...")
 import os
 import re
 import json
