@@ -8,10 +8,12 @@ TWO LANES ONLY — space/physics and history.
 
 TARGET LENGTH: 20-30 seconds (60-75 words, 4 scenes).
 
-GEMINI MODEL: gemini-3.8-flash only.
+SDK: google-genai (the current package). The old
+google-generativeai package is deprecated and no longer receives
+updates — do not switch back.
 
 REQUIRED INSTALLS (Colab + GitHub Actions pip line):
-    !pip install google-generativeai edge-tts moviepy pillow requests --quiet
+    !pip install google-genai edge-tts moviepy pillow requests --quiet
 ==================================================================
 """
 
@@ -379,16 +381,47 @@ def _build_style_reference_block():
     )
 
 
+# ------------------------------------------------------------------
+# Gemini error helpers — the new SDK has its own error hierarchy,
+# NOT google.api_core.exceptions. Checking e.code is how you tell
+# a quota error (429) from a model-missing error (404).
+# ------------------------------------------------------------------
+
+from google.genai import errors as genai_errors
+
+
+def _gemini_error_code(e):
+    """Returns the HTTP status code from a google.genai error, or
+    None if it's not a genai error at all."""
+    if isinstance(e, genai_errors.APIError):
+        return getattr(e, "code", None)
+    return None
+
+
 def _is_quota_error(e):
+    code = _gemini_error_code(e)
+    if code == 429:
+        return True
+    # Fallback: some errors don't surface a code cleanly
     msg = str(e)
-    return any(
-        marker in msg
-        for marker in ("RESOURCE_EXHAUSTED", "429", "quota")
-    )
+    return "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower()
+
+
+def _is_model_unavailable_error(e):
+    """404 NOT_FOUND — model doesn't exist for this account/project."""
+    code = _gemini_error_code(e)
+    if code == 404:
+        return True
+    msg = str(e)
+    return "NOT_FOUND" in msg or "no longer available" in msg
 
 
 def _is_transient_gemini_error(e):
-    return not _is_quota_error(e)
+    """Non-quota, non-unavailable errors (5xx, network) get fast
+    retries; everything else raises immediately."""
+    if _is_quota_error(e) or _is_model_unavailable_error(e):
+        return False
+    return True
 
 
 def _extract_retry_delay(e):
@@ -397,6 +430,7 @@ def _extract_retry_delay(e):
 
 
 def _is_daily_quota_error(e):
+    """Per-day quota errors can't be fixed by sleeping briefly."""
     return "PerDayPerProject" in str(e)
 
 
@@ -466,16 +500,18 @@ def generate_script(topic, ending_style, recent_titles=None):
         style_reference_block=style_reference_block,
     )
 
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
+    # New SDK: single client object, no configure() call.
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
     print(f"      (using model: {GEMINI_MODEL})")
-    model = genai.GenerativeModel(GEMINI_MODEL)
 
     def _call():
-        return model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"},
+        return client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
         )
 
     response = _call_gemini_with_quota_fallback(
