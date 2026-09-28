@@ -34,8 +34,8 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install google-generativeai edge-tts moviepy pillow requests numpy google-auth-oauthlib
-
+          
+pip install google-genai edge-tts moviepy pillow requests numpy google-auth-oauthlib
       - name: Run pipeline
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
