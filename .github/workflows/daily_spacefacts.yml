@@ -28,9 +28,9 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies & fonts
+      - name: Install system dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+          sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Install Python dependencies
         run: |
@@ -43,8 +43,6 @@ jobs:
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python main_spacefacts.py
 
       - name: Commit updated state file
