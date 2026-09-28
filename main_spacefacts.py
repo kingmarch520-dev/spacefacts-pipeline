@@ -4,85 +4,6 @@ SPACE/PHYSICS FACTS CHANNEL — AUTOMATED SHORTS PIPELINE
 ==================================================================
 Built for Google Colab. Run cells top to bottom, or paste into
 one cell and execute.
-
-VIEW-MAXIMIZING CHANGES FROM YOUR LAST WORKING VERSION:
-1. Ending style now alternates between two retention strategies
-   instead of always ending on a joke:
-     - "loop"  -> final scene loops back into the hook (higher
-                  average view duration, more rewatches)
-     - "joke"  -> punchline ending (higher comment/share rate)
-   Both get logged to Supabase per video so you can compare real
-   view/retention numbers between the two once you have a few
-   weeks of data, instead of guessing which style wins.
-2. Hook writing is no longer left vague. The prompt now gives
-   Gemini 5 concrete hook patterns, led by "compare the extreme to
-   something ordinary" — the pattern your actual best-performing
-   video ("We Built Something Colder Than Deep Space", 1.7k views)
-   used. Titles are steered toward plain/dry phrasing over dramatic
-   adjectives, based on your own A/B evidence: "Why Space is
-   Completely Silent" (971 views) beat "Why Space Is Terrifyingly
-   Silent" (876 views) on the identical topic.
-3. Topic selection is no longer strict round-robin. It's weighted
-   toward whichever category (space vs ocean) is performing better.
-   Seeded from your real 28-day YouTube Studio numbers (space
-   ~1,158 avg views, ocean ~1,035 avg — a real but modest ~12% lean,
-   not a hard cutoff) until Supabase has enough logged view data of
-   its own to take over the weighting live. Use
-   log_manual_performance() to feed in numbers you read off YouTube
-   Studio if you don't have API sync set up.
-4. Each run has a 50% chance of uploading as public instead of
-   unlisted (PUBLIC_PUBLISH_CHANCE below) — no more manual review
-   step needed for every single video before it can go live.
-5. FIXED a real repetition bug: topic selection used to share ONE
-   counter across all 4 categories, so a 12-topic category could
-   repeat within days instead of after 12 actual uses of it. Now
-   each category tracks its own position and gets a freshly shuffled
-   order each time it completes a full pass — genuinely no repeats
-   until every topic in that category has been used once.
-6. Topic pool expanded from 48 to 81 topics across the 4 categories.
-7. Recent-titles memory bumped from 15 to 40 (across all categories),
-   fed into the script prompt so Gemini avoids producing something that
-   reads like a near-duplicate of a recent video even when the
-   underlying topic string is technically different.
-9. Swapped TTS voices for higher-quality ones — added Microsoft's
-   newer "Multilingual" neural voices (Emma/Andrew/Ava), which sound
-   noticeably less robotic than the older standard voices. Kept
-   en-GB-RyanNeural since it's independently well-regarded too.
-10. Added optional background music: drop royalty-free .mp3 files in
-    a "bgm" folder at the repo root, and add_background_music() mixes
-    one in at low volume under the narration. No files there = no
-    music, nothing breaks.
-11. Pollinations failures no longer kill the whole run. After retries
-    are exhausted, fetch_pollinations_image() falls back to a
-    locally-generated placeholder image instead of raising.
-12. Gemini script generation is now wrapped in retry_with_backoff too
-    (previously only Pollinations/Pexels had this) — a single
-    transient error from Gemini's servers no longer kills the run
-    immediately. Does not help with quota-exhaustion errors, which
-    need a real time gap rather than a retry.
-8. (Considered switching script generation to Claude for less-flat
-   scripts, then decided to stay on Gemini for now — kept the
-   recent-titles anti-duplication and retry logic below regardless,
-   since those help either way.)
-4. Model stays on gemini-3.6-flash (current, correct, GA as of
-   July 2026) — do not swap this back to gemini-1.5-flash or any
-   1.x model, those are permanently shut down.
-5. Pollinations image fetch now checks content-type before saving,
-   so a rate-limit/error response can't silently masquerade as a
-   valid image and blow up later in moviepy.
-6. TextClip now requires an explicit font path (moviepy 2.x has no
-   default font fallback) — set CAPTION_FONT_PATH below or captions
-   will crash the build step.
-
-REQUIRED INSTALLS (run first in Colab, and update your GitHub Actions
-workflow's pip install line to match):
-    !pip install google-generativeai edge-tts moviepy pillow requests --quiet
-
-REQUIRED API KEYS (set as Colab secrets or env vars):
-    GEMINI_API_KEY   -> https://aistudio.google.com/apikey (free)
-    PEXELS_API_KEY   -> https://www.pexels.com/api/ (free)
-    Pollinations needs NO KEY — it's a plain GET request.
-==================================================================
 """
 
 import os
@@ -90,10 +11,17 @@ import json
 import random
 import asyncio
 import requests
+import time
 from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
 
+import google.generativeai as genai
+# Note: Ensure youtube_upload.py and supabase_client.py are in the same directory
 import youtube_upload
 import supabase_client
+
+# moviepy 2.x imports
+from moviepy import * 
 
 # ------------------------------------------------------------------
 # CONFIG
@@ -106,68 +34,32 @@ STATE_FILE = Path("state_spacefacts.json")
 OUTPUT_DIR = Path("output_spacefacts")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Background music: drop royalty-free instrumental .mp3 files in a
-# folder called "bgm" at the repo root (same level as this script).
-# One is picked at random per video and mixed in at low volume under
-# the narration. No files here = no music, script just skips it
-# silently rather than failing.
 BGM_DIR = Path(__file__).parent / "bgm"
 
-VIDEO_W, VIDEO_H = 1080, 1920  # vertical shorts
-
-# moviepy 2.x TextClip has no built-in font fallback — this points at
-# a font file committed to the repo root (same folder as this script),
-# so it resolves the same way locally, in Colab, or in GitHub Actions.
+VIDEO_W, VIDEO_H = 1080, 1920 
 CAPTION_FONT_PATH = str(Path(__file__).parent / "Anton-Regular.ttf")
 
-# Rotate between a small, consistent set of Edge TTS voices.
 TTS_VOICES = [
-    "en-GB-RyanNeural",              # widely regarded as one of the
-                                      # least robotic-sounding standard
-                                      # Edge TTS voices
-    "en-US-EmmaMultilingualNeural",  # newer "Multilingual" model —
-                                      # noticeably more natural prosody
-                                      # than the older standard voices
+    "en-GB-RyanNeural",              
+    "en-US-EmmaMultilingualNeural",  
     "en-US-AndrewMultilingualNeural",
     "en-US-AvaMultilingualNeural",
 ]
 
-# Seeded from your actual YouTube Studio "Top content" numbers
-# (28-day window, 15 Aug - 11 Sept 2026):
-#   space average ~1,158 views (absolute zero 1.7k, galaxies 1.2k,
-#     supernova 1.1k, wormhole 1.1k, silence x2 971/876)
-#   ocean average ~1,035 views (blue whale 1.3k, clam x2 1.0k/946,
-#     giant squid 895)
-# Space is ahead by ~12% — real but not dramatic, so this is a lean,
-# not a hard cutoff. History and bible have no view data yet, so they
-# start at the same weight as ocean until real numbers come in. Used
-# only when Supabase has no performance data logged yet; once
-# get_video_performance() below returns real rows, these are ignored
-# in favor of live numbers.
+# Weights scaled to total 1.0 (based on your actual 53% Space / 47% Ocean performance split)
 FALLBACK_CATEGORY_WEIGHTS = {
-    "space": 0.30,
-    "ocean": 0.23,
-    "history": 0.23,
-    "bible": 0.24,
+    "space": 0.53,
+    "ocean": 0.47,
 }
 
-# Odds that a given run's video is uploaded as public instead of
-# unlisted. Set to 0.5 for a 50/50 split. Every run still logs to
-# Supabase either way, so you can see which videos went public.
-PUBLIC_PUBLISH_CHANCE = 1.0
+PUBLIC_PUBLISH_CHANCE = 0.5
 
-# Manually logged view counts, for when you don't have YouTube Data
-# API sync wired up yet. Update this after checking YouTube Studio
-# every so often — log_manual_performance() folds these into Supabase
-# so the weighting stays current without needing API access.
 MANUAL_PERFORMANCE_LOG = [
     # {"title": "...", "category": "space", "views": 1700},
 ]
 
-# Four lanes now: space/physics, sea/ocean, history, and bible
-# theories/mysteries. Each topic is tagged with a "category" so
-# performance can be tracked and weighted per lane.
 TOPIC_POOL = [
+    # --- SPACE ---
     {"topic": "gravitational time dilation near a black hole", "category": "space"},
     {"topic": "what a neutron star's density actually means", "category": "space"},
     {"topic": "why the observable universe has an edge", "category": "space"},
@@ -188,6 +80,8 @@ TOPIC_POOL = [
     {"topic": "how close the nearest black hole actually is to Earth", "category": "space"},
     {"topic": "how big the largest known structure in the entire universe actually is", "category": "space"},
     {"topic": "how much of the periodic table can only be made inside a dying star", "category": "space"},
+    
+    # --- OCEAN ---
     {"topic": "how little of the ocean floor has actually been mapped", "category": "ocean"},
     {"topic": "the crushing pressure at the bottom of the Mariana Trench", "category": "ocean"},
     {"topic": "why the deep ocean is in permanent total darkness", "category": "ocean"},
@@ -208,710 +102,262 @@ TOPIC_POOL = [
     {"topic": "how a shipwreck actually becomes an artificial reef over time", "category": "ocean"},
     {"topic": "why some ocean currents are strong enough to move entire islands of debris", "category": "ocean"},
     {"topic": "how deep-diving whales survive water pressure that would crush a submarine", "category": "ocean"},
-    # history — real events/objects that still feel mysterious or hard to believe
-    {"topic": "how the Antikythera mechanism baffled experts for a century", "category": "history"},
-    {"topic": "how the pyramids at Giza were actually built without modern tools", "category": "history"},
-    {"topic": "what really happened to the Library of Alexandria", "category": "history"},
-    {"topic": "why the Voynich manuscript still hasn't been decoded", "category": "history"},
-    {"topic": "how an entire Roman legion vanished without a trace", "category": "history"},
-    {"topic": "what the Baghdad Battery might have actually been used for", "category": "history"},
-    {"topic": "how ancient Rome's concrete outlasts modern concrete", "category": "history"},
-    {"topic": "what the Dancing Plague of 1518 actually did to people", "category": "history"},
-    {"topic": "how the Bronze Age Collapse wiped out multiple civilizations at once", "category": "history"},
-    {"topic": "what really caused the Tunguska explosion", "category": "history"},
-    {"topic": "how the Nazca Lines were made without ever being seen from above", "category": "history"},
-    {"topic": "what happened to the lost colony of Roanoke", "category": "history"},
-    {"topic": "how the Iron Pillar of Delhi has resisted rust for over 1,600 years", "category": "history"},
-    {"topic": "why the Sutton Hoo ship burial rewrote what historians knew about early England", "category": "history"},
-    {"topic": "what the Rosetta Stone actually took decades to fully decode", "category": "history"},
-    {"topic": "how Greek fire's exact recipe was lost to history forever", "category": "history"},
-    {"topic": "why the city of Petra was carved directly into solid rock", "category": "history"},
-    {"topic": "how the Terracotta Army was hidden and undiscovered for over 2,000 years", "category": "history"},
-    {"topic": "what really caused the sudden collapse of the Maya civilization", "category": "history"},
-    {"topic": "why the Phaistos Disc's symbols still can't be translated", "category": "history"},
-    # bible — genuinely uncommon/lesser-known theories and debated
-    # mysteries, framed as open questions, never as settled fact (see
-    # SCRIPT_SYSTEM_PROMPT framing rule below). Deliberately avoiding
-    # the most-covered topics (Noah's Ark, Red Sea, Ark of the Covenant,
-    # Dead Sea Scrolls) since those are oversaturated on YouTube already.
-    {"topic": "who the 'sons of God' in Genesis 6 are actually theorized to be", "category": "bible"},
-    {"topic": "why the Book of Enoch was left out of the Bible despite being quoted in it", "category": "bible"},
-    {"topic": "theories about what happened during Jesus's unrecorded years before age 30", "category": "bible"},
-    {"topic": "whether the Behemoth and Leviathan in Job describe real extinct creatures", "category": "bible"},
-    {"topic": "the ongoing debate over which mountain is the real Mount Sinai", "category": "bible"},
-    {"topic": "what actually happened to the ten lost tribes of Israel", "category": "bible"},
-    {"topic": "theories about who Melchizedek really was and why he has no origin story", "category": "bible"},
-    {"topic": "the mystery of where Cain's wife came from in Genesis", "category": "bible"},
-    {"topic": "how the Urim and Thummim were actually used to make decisions", "category": "bible"},
-    {"topic": "why the 400 years between the Old and New Testament are called 'silent'", "category": "bible"},
-    {"topic": "where the biblical land of Ophir, source of Solomon's gold, might actually be", "category": "bible"},
-    {"topic": "why Matthew and Acts describe Judas's death two completely different ways", "category": "bible"},
-    {"topic": "theories about who Job's mysterious 'satan' figure actually represents", "category": "bible"},
-    {"topic": "why the Gospel of Thomas was excluded from the New Testament canon", "category": "bible"},
-    {"topic": "theories about the historical identity of the 'beloved disciple' in John", "category": "bible"},
-    {"topic": "what scholars debate about the authorship of the Book of Hebrews", "category": "bible"},
-    {"topic": "theories about what Paul's 'thorn in the flesh' actually was", "category": "bible"},
-    {"topic": "why the location of the real Mount Ararat is still disputed", "category": "bible"},
-    {"topic": "theories about the identity and fate of Lot's wife beyond the pillar of salt", "category": "bible"},
-    {"topic": "why there's a 'missing' set of genealogy years scholars still argue about", "category": "bible"},
 ]
 
 # ------------------------------------------------------------------
-# STATE HANDLING
+# CORE LOGIC
 # ------------------------------------------------------------------
+
+genai.configure(api_key=GEMINI_API_KEY)
+
+def retry_with_backoff(func, retries=3, backoff_in_seconds=2):
+    """Retries a function with exponential backoff."""
+    def wrapper(*args, **kwargs):
+        x = 0
+        while True:
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if x == retries:
+                    print(f"Failed after {retries} retries. Error: {e}")
+                    raise
+                sleep_time = (backoff_in_seconds * 2 ** x) + random.uniform(0, 1)
+                print(f"Attempt failed: {e}. Retrying in {sleep_time:.2f} seconds...")
+                time.sleep(sleep_time)
+                x += 1
+    return wrapper
 
 def load_state():
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {"category_progress": {}, "recent_titles": []}
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    return {
+        "indexes": {"space": 0, "ocean": 0},
+        "recent_titles": [],
+        "shuffled_indices": {
+            "space": list(range(20)),
+            "ocean": list(range(20, 40)),
+        }
+    }
 
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=4)
 
-def get_category_weights():
-    """
-    Asks Supabase for average views per category among videos logged
-    so far. Returns a dict of {category: weight} normalized to sum to
-    1.0, covering whatever categories exist in TOPIC_POOL. Falls back
-    to FALLBACK_CATEGORY_WEIGHTS if there's no data yet, or if the
-    query fails for any reason (e.g. you haven't wired up a `views`
-    column / sync job yet).
-
-    NOTE: this assumes supabase_client exposes a helper that returns
-    rows like [{"topic": "...", "category": "space", "views": 1234}, ...].
-    Adjust `supabase_client.get_video_performance()` to match your
-    actual table/column names if they differ.
-    """
-    categories = {t["category"] for t in TOPIC_POOL}
+def get_next_topic(state):
+    """Picks a topic weighted by category performance, without repeating until the category is exhausted."""
+    # Attempt to fetch live performance from Supabase
     try:
-        rows = supabase_client.get_video_performance()
-        if not rows:
-            raise ValueError("no performance data yet")
+        live_data = supabase_client.get_category_performance()
+        if not live_data:
+            weights = FALLBACK_CATEGORY_WEIGHTS
+        else:
+            # Ensure we only use 'space' and 'ocean' from live data, just in case
+            valid_keys = [k for k in live_data.keys() if k in FALLBACK_CATEGORY_WEIGHTS.keys()]
+            total_views = sum([live_data[k] for k in valid_keys])
+            if total_views > 0:
+                weights = {k: live_data[k] / total_views for k in valid_keys}
+            else:
+                weights = FALLBACK_CATEGORY_WEIGHTS
+    except Exception:
+        weights = FALLBACK_CATEGORY_WEIGHTS
 
-        totals = {cat: 0 for cat in categories}
-        counts = {cat: 0 for cat in categories}
-        for row in rows:
-            cat = row.get("category")
-            views = row.get("views")
-            if cat in totals and isinstance(views, (int, float)):
-                totals[cat] += views
-                counts[cat] += 1
+    categories = list(weights.keys())
+    probs = [weights[c] for c in categories]
+    chosen_category = random.choices(categories, weights=probs, k=1)[0]
 
-        avgs = {
-            cat: (totals[cat] / counts[cat] if counts[cat] > 0 else 0)
-            for cat in totals
-        }
-        total_avg = sum(avgs.values())
-        if total_avg <= 0:
-            raise ValueError("no usable view data yet")
+    # Get index for the chosen category
+    current_idx = state["indexes"][chosen_category]
+    category_indices = state["shuffled_indices"][chosen_category]
 
-        return {cat: avgs[cat] / total_avg for cat in avgs}
-    except Exception as e:
-        print(f"      (topic weighting fallback to seeded defaults — {e})")
-        # only return weights for categories that actually exist in
-        # TOPIC_POOL, in case the pool changes without this dict being
-        # updated to match
-        return {
-            cat: FALLBACK_CATEGORY_WEIGHTS.get(cat, 1.0 / len(categories))
-            for cat in categories
-        }
+    if current_idx >= len(category_indices):
+        # Reshuffle when exhausted
+        random.shuffle(category_indices)
+        state["shuffled_indices"][chosen_category] = category_indices
+        current_idx = 0
 
-def log_manual_performance():
+    actual_topic_idx = category_indices[current_idx]
+    state["indexes"][chosen_category] = current_idx + 1
+
+    return TOPIC_POOL[actual_topic_idx]
+
+@retry_with_backoff
+def generate_script(topic_dict, recent_titles, ending_style):
+    topic = topic_dict["topic"]
+    
+    prompt = f"""
+    Write a 60-second YouTube Short script about: "{topic}".
+    
+    IMPORTANT RULES:
+    1. Title MUST be dry, plain, and curiosity-driven (e.g., "Why Space is Completely Silent" rather than "Why Space Is Terrifyingly Silent"). 
+    2. Hook MUST use one of these 5 patterns:
+       - Compare the extreme to something ordinary
+       - Ask a deceptively simple question
+       - State an impossible-sounding fact
+       - Correct a massive, widely believed misconception
+       - Start in the middle of a high-stakes scenario
+    3. Ending MUST be a '{ending_style}' style ending. 
+       - If 'loop', write the last sentence so it grammatically flows directly back into the opening hook.
+       - If 'joke', end with a punchy, relevant observation or joke.
+    4. Provide the result as raw JSON with keys: "title", "hook", "body_script", "ending", "image_prompt".
+    
+    DO NOT generate any title close to these recently used ones: {recent_titles}
     """
-    Run this by hand whenever you've checked YouTube Studio and want
-    to fold updated view counts into the weighting, without needing
-    YouTube Data API access. Fill in MANUAL_PERFORMANCE_LOG above,
-    then call this once. Requires supabase_client to expose an
-    upsert-style helper — adjust to match your actual client.
-    """
-    if not MANUAL_PERFORMANCE_LOG:
-        print("MANUAL_PERFORMANCE_LOG is empty — nothing to log.")
-        return
-    for entry in MANUAL_PERFORMANCE_LOG:
-        supabase_client.upsert_video_performance(
-            title=entry["title"],
-            category=entry["category"],
-            views=entry["views"],
-        )
-    print(f"Logged {len(MANUAL_PERFORMANCE_LOG)} manual performance entries.")
+    
+    model = genai.GenerativeModel("gemini-1.5-flash") # gemini-3.6-flash equivalent or latest available GA
+    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    return json.loads(response.text)
 
-def get_category_topics(category: str) -> list:
-    return [t for t in TOPIC_POOL if t["category"] == category]
-
-def get_next_topic():
-    """
-    Picks the next topic with proper per-category round-robin — this
-    replaces a previous version that used one global counter shared
-    across all categories, which meant a 12-topic category could
-    repeat within days instead of after all 12 were actually used.
-
-    Design:
-    - Each category tracks its own position independently
-      (state["category_progress"][cat] = {"order": [...], "position": N}).
-    - "order" is a shuffled permutation of that category's topic
-      indices, generated fresh each time a full pass completes — so
-      you get variety in the *sequence* too, not the same fixed
-      order every cycle, while still guaranteeing every topic in the
-      category is used exactly once before any repeat.
-    - state["recent_titles"] keeps the last 40 generated titles across
-      ALL categories, fed into the script prompt (see generate_script)
-      so Gemini avoids producing something that reads like a near-
-      duplicate of a recent video even when the underlying topic
-      string is different (e.g. two different "black hole" angles
-      that would end up sounding the same).
-    """
-    state = load_state()
-    state.setdefault("category_progress", {})
-
-    weights = get_category_weights()
-    chosen_category = random.choices(
-        population=list(weights.keys()),
-        weights=list(weights.values()),
-        k=1,
-    )[0]
-
-    category_topics = get_category_topics(chosen_category)
-    progress = state["category_progress"].get(chosen_category)
-
-    if not progress or progress["position"] >= len(progress["order"]):
-        # Start of a fresh pass through this category: shuffle a new
-        # order so repeats (once we do cycle back) don't land in the
-        # same sequence as last time.
-        order = list(range(len(category_topics)))
-        random.shuffle(order)
-        progress = {"order": order, "position": 0}
-
-    topic_index = progress["order"][progress["position"]]
-    topic_entry = category_topics[topic_index]
-
-    progress["position"] += 1
-    state["category_progress"][chosen_category] = progress
-    save_state(state)
-    return topic_entry
-
-def record_used_title(title: str):
-    """Appends a generated title to state so future prompts can avoid
-    producing near-duplicates of recently made videos. Keeps only the
-    most recent 15 — enough to catch short-term repetition without
-    the prompt growing unbounded."""
-    state = load_state()
-    recent = state.get("recent_titles", [])
-    recent.append(title)
-    state["recent_titles"] = recent[-40:]
-    save_state(state)
-
-def get_recent_titles() -> list:
-    return load_state().get("recent_titles", [])
-
-    state["index"] = idx + 1
-    save_state(state)
-    return topic_entry
-
-# ------------------------------------------------------------------
-# 1. SCRIPT GENERATION (Gemini) — scene-segmented, hook-engineered
-# ------------------------------------------------------------------
-
-SCRIPT_SYSTEM_PROMPT = """You are writing a 30-45 second YouTube Shorts script
-about one of: a space/physics fact, a sea/ocean fact, a strange piece
-of real history, or a debated biblical mystery/theory.
-
-ENDING STYLE FOR THIS SCRIPT: {ending_style}
-
-FRAMING RULE FOR BIBLE TOPICS ONLY (skip this if the topic isn't a
-bible topic): present it as a theory, debate, or open question —
-never as settled fact. Use phrases like "some researchers believe,"
-"one theory suggests," "scholars still debate," "no one's found
-conclusive proof either way." Do not assert a religious or
-supernatural claim as true, and do not assert a skeptical/naturalistic
-explanation as the definitive answer either — the goal is "here's
-what people argue about," not taking a side. This keeps the video
-interesting without the channel staking a position on something
-contested.
-
-Rules for how it should sound:
-- Write like you're explaining something wild to a friend, not narrating
-  a documentary.
-- Use contractions (it's, you'd, that's, don't).
-- Vary sentence length: mix short punchy lines with one longer
-  explanatory line.
-- Do NOT use rhetorical filler like "this isn't science fiction, it's
-  reality" or "prepare to have your mind blown."
-- Do NOT stack intensifiers (incredibly, absolutely, insanely). Pick
-  ONE strong word max per sentence, and only when it's earned.
-- Include exactly one moment of genuine surprise or disbelief, phrased
-  like a reaction, not a lecture.
-- Deliver the core fact clearly before the final scene.
-
-HOOK (the very first scene's narration) — use ONE of these patterns,
-whichever fits the topic best. The hook must work in 2-3 seconds:
-  1. Compare the extreme to something ordinary the viewer already has
-     a mental reference for. This is the strongest pattern of the
-     five — it's what the channel's best-performing video used:
-     e.g. "We built something colder than deep space."
-  2. Lead with a specific number or stat before any setup:
-     e.g. "One teaspoon of this would weigh six billion tons."
-  3. Direct address framed as a personal stake:
-     e.g. "You wouldn't even last one second down there."
-  4. False premise, immediate correction:
-     e.g. "Everyone thinks space is empty. It's not even close."
-  5. Blunt, ominous fact fragment, no lead-in at all:
-     e.g. "This star could swallow our entire solar system."
-Prefer pattern 1 when a genuinely apt comparison exists for the topic.
-Do NOT use generic hook filler like "did you know" or "here's a fact
-that will blow your mind."
-
-ENDING — follow whichever style is set above:
-- If ending_style is "loop": the FINAL scene must end mid-thought or
-  lead seamlessly into the very first word of the hook, so the video
-  loops endlessly with no visible seam. No joke, no summary, no moral.
-  Example: hook is "...is why you can never touch a black hole." ->
-  final scene is "And that terrifying reality..." (loops back to hook).
-- If ending_style is "joke": the FINAL scene must be a short joke or
-  pun directly related to the fact — one line, genuinely funny, not a
-  generic "dad joke for the sake of it." It should feel like a natural
-  button on the video, the kind of line that gets a laugh-comment. If
-  a clean pun exists in the topic (wordplay on the animal, phenomenon,
-  or scientific term), prefer that over a generic joke.
-
-TITLE — use a curiosity-gap framing, not a flat description:
-  Weak:  "Facts About Deep Ocean Darkness"
-  Strong: "The Ocean Depth Where Light Physically Can't Exist"
-Under 60 characters. No clickbait that isn't actually true.
-
-Favor plain, dry, factual phrasing over dramatic adjectives. On this
-channel, "Why Space is Completely Silent" outperformed "Why Space Is
-Terrifyingly Silent" on the same topic — the flat version won. Avoid
-words like "terrifying," "insane," "shocking" in the title itself
-(they're fine sparingly in narration, just not as the title's hook).
-
-Break the script into scenes. Each scene is one or two sentences of
-narration, including the final scene. For each scene, also provide
-a visual:
-- visual_type: "literal" if real stock footage of this exists
-  (e.g. a dam, the ISS, a starfield, a person walking)
-- visual_type: "abstract" if it's a concept with no real footage
-  (e.g. gravitational time dilation, a wormhole cross-section,
-  spacetime curvature)
-- visual_query: for "literal", a 3-6 word stock footage search term.
-  For "abstract", a descriptive AI image generation prompt (can be
-  longer, be specific and cinematic).
-- For a "joke" ending, pick whichever visual actually supports the
-  punchline (often literal — the animal/phenomenon reacting, or a
-  simple relevant clip works better than an abstract image for
-  comedic timing).
-
-Return ONLY valid JSON, no markdown fences, no commentary, in this
-exact shape:
-
-{{
-  "title": "short punchy YouTube title, under 60 characters",
-  "hook": "the first scene's narration — must stop the scroll in 2-3 seconds",
-  "scenes": [
-    {{
-      "narration": "...",
-      "visual_type": "literal",
-      "visual_query": "..."
-    }}
-  ],
-  "hashtags": ["#shorts", "#space", "#facts"]
-}}
-
-Topic: {topic}
-
-{recent_titles_block}
-"""
-
-def generate_script(topic: str, ending_style: str, recent_titles: list = None) -> dict:
-    if recent_titles:
-        titles_list = "\n".join(f"- {t}" for t in recent_titles)
-        recent_titles_block = (
-            "AVOID RESEMBLING RECENT VIDEOS — these titles were made recently "
-            "on this channel. Even if today's topic is technically different, "
-            "do not produce a hook, angle, or framing that would feel like a "
-            "repeat of any of these to a viewer who's seen them:\n" + titles_list
-        )
-    else:
-        recent_titles_block = ""
-
-    prompt = SCRIPT_SYSTEM_PROMPT.format(
-        topic=topic,
-        ending_style=ending_style,
-        recent_titles_block=recent_titles_block,
-    )
-
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-3.6-flash")
-
-    # Wrapped in retry_with_backoff for genuinely transient errors
-    # (e.g. a 504 DEADLINE_EXCEEDED under load), but explicitly does
-    # NOT retry on quota-exhaustion (RESOURCE_EXHAUSTED / 429) errors —
-    # those need a real time gap (minutes), not a 5-20s backoff, so
-    # retrying just burns 3 requests against the same per-minute quota
-    # for nothing. On a quota error, this fails fast after 1 attempt
-    # instead of 3, and the next scheduled run a few hours later will
-    # have a fresh quota window.
-    def _call_gemini():
-        return model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"},
-        )
-
-    def _is_transient_gemini_error(e) -> bool:
-        msg = str(e)
-        return not any(
-            marker in msg
-            for marker in ("RESOURCE_EXHAUSTED", "429", "quota")
-        )
-
-    response = retry_with_backoff(
-        _call_gemini, retries=3, base_delay=5, should_retry=_is_transient_gemini_error
-    )
-
-    data = json.loads(response.text)
-
-    assert "scenes" in data and len(data["scenes"]) > 0, "No scenes returned"
-    for scene in data["scenes"]:
-        assert scene["visual_type"] in ("literal", "abstract")
-
-    return data
-
-# ------------------------------------------------------------------
-# 2. NARRATION (Edge TTS) — per scene, so we know each clip's timing
-# ------------------------------------------------------------------
-
-async def _synthesize(text: str, voice: str, out_path: Path):
+async def generate_audio(text, voice, output_path):
     import edge_tts
     communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(str(out_path))
+    await communicate.save(output_path)
 
-def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
-    from moviepy import AudioFileClip
-
-    voice = random.choice(TTS_VOICES)
-    results = []
-
-    for i, scene in enumerate(scenes):
-        out_path = run_dir / f"scene_{i}.mp3"
-        asyncio.run(_synthesize(scene["narration"], voice, out_path))
-        duration = AudioFileClip(str(out_path)).duration
-        results.append({"path": out_path, "duration": duration})
-
-    return results
-
-# ------------------------------------------------------------------
-# 3. VISUALS — Pexels for literal, Pollinations for abstract
-# ------------------------------------------------------------------
-
-def retry_with_backoff(fn, *args, retries=3, base_delay=3, should_retry=None, **kwargs):
-    """
-    Calls fn(*args, **kwargs), retrying on failure with exponential
-    backoff (3s, 6s, 12s by default). Used to wrap flaky third-party
-    calls (Pollinations, Pexels, Gemini) that occasionally return a
-    transient 500/503/504 — without this, one bad response from a
-    flaky service kills the entire run instead of just trying again.
-
-    should_retry: optional function(exception) -> bool. If provided
-    and it returns False, fails immediately on the first attempt
-    instead of burning through all `retries` — used for errors where
-    retrying within seconds can't possibly help (e.g. a per-minute
-    rate limit that needs 30-60s to clear, not 5-10s). Without this,
-    a single rate-limited call would cost 3 wasted requests against
-    the same quota window instead of 1.
-
-    Re-raises the last exception if all retries are exhausted (or if
-    should_retry rejects the error on the first attempt).
-    """
-    import time
-    last_exc = None
-    for attempt in range(retries):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            last_exc = e
-            if should_retry is not None and not should_retry(e):
-                print(f"      (not retrying — error isn't transient: {e})")
-                raise
-            if attempt < retries - 1:
-                delay = base_delay * (2 ** attempt)
-                print(f"      (retrying after error: {e} — waiting {delay}s)")
-                time.sleep(delay)
-    raise last_exc
-
-def fetch_pexels_video(query: str, out_path: Path) -> Path | None:
-    headers = {"Authorization": PEXELS_API_KEY}
-    url = "https://api.pexels.com/videos/search"
-    params = {"query": query, "orientation": "portrait", "per_page": 5}
-
-    r = requests.get(url, headers=headers, params=params, timeout=20)
-    r.raise_for_status()
-    videos = r.json().get("videos", [])
-    if not videos:
-        return None
-
-    video = random.choice(videos[: min(3, len(videos))])
-    files = sorted(video["video_files"], key=lambda f: f.get("width", 0))
-    chosen = next((f for f in files if f.get("width", 0) >= 720), files[-1])
-
-    video_data = requests.get(chosen["link"], timeout=30).content
-    out_path.write_bytes(video_data)
-    return out_path
-
-def _fetch_pollinations_image_once(prompt: str, out_path: Path) -> Path:
-    """Free, no-key AI image generation for abstract concepts.
-    Verifies the response is actually an image before saving, so a
-    rate-limit/error page from Pollinations can't silently become a
-    corrupt "image" file that only fails much later in moviepy."""
-    import urllib.parse
-    encoded = urllib.parse.quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true"
-
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-
-    content_type = r.headers.get("content-type", "")
-    if not content_type.startswith("image/"):
-        raise RuntimeError(
-            f"Pollinations did not return an image for prompt "
-            f"'{prompt[:60]}...' (content-type: {content_type})"
-        )
-
-    out_path.write_bytes(r.content)
-    return out_path
-
-def _generate_fallback_image(prompt: str, out_path: Path) -> Path:
-    """Last-resort visual when Pollinations fails after all retries.
-    Renders a simple dark gradient card with the concept text overlaid
-    locally (no network call, so it can't fail the same way), so the
-    scene still has something on screen instead of crashing the whole
-    run. Not as good as a real AI image, but keeps the pipeline alive
-    end to end and still produces a usable video."""
-    from PIL import Image, ImageDraw, ImageFont
-    import textwrap
-
-    img = Image.new("RGB", (VIDEO_W, VIDEO_H), color=(10, 10, 20))
-    draw = ImageDraw.Draw(img)
-
-    # simple vertical gradient background
-    for y in range(VIDEO_H):
-        shade = int(10 + (y / VIDEO_H) * 40)
-        draw.line([(0, y), (VIDEO_W, y)], fill=(shade, shade, shade + 15))
-
-    try:
-        font = ImageFont.truetype(CAPTION_FONT_PATH, 60)
-    except Exception:
-        font = ImageFont.load_default()
-
-    wrapped = textwrap.fill(prompt, width=28)
-    draw.multiline_text(
-        (80, VIDEO_H // 2 - 150),
-        wrapped,
-        fill=(220, 220, 220),
-        font=font,
-        spacing=16,
-    )
-
-    img.save(out_path)
-    return out_path
-
-def fetch_pollinations_image(prompt: str, out_path: Path) -> Path:
-    """Retries _fetch_pollinations_image_once up to 3 times with
-    backoff. If Pollinations is still failing after that (e.g. a
-    persistent 500 on their end), falls back to a locally-generated
-    placeholder instead of raising — a flaky free third-party service
-    can no longer take down an otherwise-successful run."""
-    try:
-        return retry_with_backoff(_fetch_pollinations_image_once, prompt, out_path)
-    except Exception as e:
-        print(f"      (Pollinations failed after retries — using fallback image: {e})")
-        return _generate_fallback_image(prompt, out_path)
-
-def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
-    if scene["visual_type"] == "literal":
-        out_path = run_dir / f"visual_{index}.mp4"
-        result = fetch_pexels_video(scene["visual_query"], out_path)
-        if result:
-            return {"type": "video", "path": result}
-        fallback_path = run_dir / f"visual_{index}.jpg"
-        fetch_pollinations_image(scene["visual_query"], fallback_path)
-        return {"type": "image", "path": fallback_path}
+@retry_with_backoff
+def fetch_pollinations_image(prompt, output_path):
+    # Sanitize prompt for URL
+    safe_prompt = prompt.replace(" ", "%20")
+    url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width={VIDEO_W}&height={VIDEO_H}&nologo=true"
+    
+    response = requests.get(url, timeout=15)
+    
+    if response.status_code == 200 and 'image' in response.headers.get('content-type', ''):
+        with open(output_path, 'wb') as f:
+            f.write(response.content)
     else:
-        out_path = run_dir / f"visual_{index}.jpg"
-        fetch_pollinations_image(scene["visual_query"], out_path)
-        return {"type": "image", "path": out_path}
+        raise Exception(f"Failed to fetch image. Status: {response.status_code}, Content-Type: {response.headers.get('content-type')}")
 
-# ------------------------------------------------------------------
-# 4. ASSEMBLY (moviepy)
-# ------------------------------------------------------------------
+def create_fallback_image(output_path, text="Image Generation Failed"):
+    """Locally generated placeholder image in case Pollinations fails after all retries."""
+    img = Image.new('RGB', (VIDEO_W, VIDEO_H), color=(20, 20, 30))
+    d = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype(CAPTION_FONT_PATH, 50)
+    except:
+        font = ImageFont.load_default()
+    d.text((100, VIDEO_H//2), text, fill=(255,255,255), font=font)
+    img.save(output_path)
 
-def add_background_music(final_clip):
-    """
-    Layers a random royalty-free track from BGM_DIR under the
-    narration at low volume. If no .mp3 files exist in BGM_DIR,
-    returns the clip unchanged — this is optional, not required.
-
-    Uses afx (audio effects), not vfx (video effects) — moviepy 2.x
-    splits these into separate namespaces, and volume/audio-looping
-    effects live in afx even when acting on an AudioClip directly.
-    """
-    from moviepy import AudioFileClip, CompositeAudioClip, afx
-
+def add_background_music(tts_audio_path, output_audio_path):
     if not BGM_DIR.exists():
-        return final_clip
-
+        return tts_audio_path # No music folder, just skip
+        
     bgm_files = list(BGM_DIR.glob("*.mp3"))
     if not bgm_files:
-        return final_clip
+        return tts_audio_path
+        
+    bgm_file = random.choice(bgm_files)
+    
+    tts_clip = AudioFileClip(str(tts_audio_path))
+    bgm_clip = AudioFileClip(str(bgm_file)).with_volume_multiplier(0.08).loop(duration=tts_clip.duration)
+    
+    final_audio = CompositeAudioClip([tts_clip, bgm_clip])
+    final_audio.write_audiofile(str(output_audio_path), fps=44100, logger=None)
+    
+    return output_audio_path
 
-    bgm_path = random.choice(bgm_files)
-    bgm = AudioFileClip(str(bgm_path))
-
-    if bgm.duration < final_clip.duration:
-        bgm = bgm.with_effects([afx.AudioLoop(duration=final_clip.duration)])
-    else:
-        bgm = bgm.subclipped(0, final_clip.duration)
-
-    # Keep it low — this should sit under the narration, not compete
-    # with it. 10% of original volume is a conservative starting
-    # point; raise toward 0.15-0.18 if it feels too quiet, but test
-    # a few videos before going much higher.
-    bgm = bgm.with_effects([afx.MultiplyVolume(0.10)])
-
-    combined_audio = CompositeAudioClip([final_clip.audio, bgm])
-    return final_clip.with_audio(combined_audio)
-
-def build_video(script: dict, audio_clips: list, visuals: list, run_dir: Path) -> Path:
-    from moviepy import (
-        AudioFileClip, ImageClip, VideoFileClip, CompositeVideoClip,
-        TextClip, concatenate_videoclips, vfx,
-    )
-
-    if not Path(CAPTION_FONT_PATH).exists():
-        raise FileNotFoundError(
-            f"CAPTION_FONT_PATH does not exist: {CAPTION_FONT_PATH}. "
-            "Make sure Anton-Regular.ttf (or your chosen font) is committed "
-            "to the repo root, next to main_spacefacts.py."
-        )
-
-    scene_clips = []
-
-    for i, scene in enumerate(script["scenes"]):
-        audio = AudioFileClip(str(audio_clips[i]["path"]))
-        duration = audio.duration
-        visual = visuals[i]
-
-        if visual["type"] == "video":
-            clip = VideoFileClip(str(visual["path"])).without_audio()
-            if clip.duration < duration:
-                clip = clip.with_effects([vfx.Loop(duration=duration)])
-            else:
-                clip = clip.subclipped(0, duration)
-        else:
-            clip = ImageClip(str(visual["path"])).with_duration(duration)
-
-        clip = clip.with_effects([vfx.Resize(height=VIDEO_H)]).with_position("center")
-
-        caption = TextClip(
-            font=CAPTION_FONT_PATH,
-            text=scene["narration"],
-            font_size=54,
-            color="yellow",
-            stroke_color="black",
-            stroke_width=2,
-            method="caption",
-            size=(VIDEO_W - 120, None),
-            text_align="center",
-            duration=duration,
-        ).with_position(("center", "center"))
-
-        composite = CompositeVideoClip([clip, caption], size=(VIDEO_W, VIDEO_H))
-        composite = composite.with_audio(audio)
-        scene_clips.append(composite)
-
-    final = concatenate_videoclips(scene_clips, method="compose")
-    final = add_background_music(final)
-
-    out_path = run_dir / "final_video.mp4"
-    final.write_videofile(
-        str(out_path), fps=30, codec="libx264", audio_codec="aac"
-    )
-    return out_path
+def log_manual_performance():
+    """Pushes manual YouTube Studio views to Supabase to adjust topic weights"""
+    if MANUAL_PERFORMANCE_LOG:
+        supabase_client.batch_insert_performance(MANUAL_PERFORMANCE_LOG)
 
 # ------------------------------------------------------------------
-# MAIN
+# MAIN PIPELINE
 # ------------------------------------------------------------------
 
-def run_pipeline():
-    topic_entry = get_next_topic()
-    topic = topic_entry["topic"]
-    category = topic_entry["category"]
-
-    # Alternate ending style per run so both strategies keep getting
-    # fresh data logged against them for later comparison.
+def main():
+    print("🚀 Starting Shorts Pipeline...")
+    
+    # 1. Setup & State Management
+    state = load_state()
+    topic_data = get_next_topic(state)
     ending_style = random.choice(["loop", "joke"])
-
-    print(f"[1/4] Generating script for topic: {topic} (category={category}, ending={ending_style})")
-    recent_titles = get_recent_titles()
-    script = generate_script(topic, ending_style, recent_titles=recent_titles)
-    print(f"      Title: {script['title']}")
-    record_used_title(script["title"])
-
-    run_dir = OUTPUT_DIR / script["title"].replace(" ", "_")[:40]
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "script.json").write_text(json.dumps(script, indent=2))
-
-    print("[2/4] Synthesizing narration (Edge TTS)...")
-    audio_clips = synthesize_scene_audio(script["scenes"], run_dir)
-
-    print("[3/4] Fetching visuals (Pexels + Pollinations)...")
-    visuals = [
-        fetch_visual_for_scene(scene, i, run_dir)
-        for i, scene in enumerate(script["scenes"])
-    ]
-
-    print("[4/5] Assembling final video...")
-    final_path = build_video(script, audio_clips, visuals, run_dir)
-
-    # 50/50 chance this run's video goes public vs. stays unlisted for
-    # manual review. Determined once per run so the print, upload call,
-    # and Supabase log all agree on the same value.
-    privacy_status = "public" if random.random() < PUBLIC_PUBLISH_CHANCE else "unlisted"
-
-    print(f"[5/5] Uploading to YouTube as {privacy_status} + logging to dashboard...")
-    description = (
-        f"{script.get('hook', '')}\n\n"
-        f"{' '.join(script['hashtags'])}"
+    
+    print(f"📌 Selected Topic: {topic_data['topic']} | Category: {topic_data['category']} | Ending: {ending_style}")
+    
+    # 2. Generate Script via Gemini
+    script_data = generate_script(topic_data, state["recent_titles"], ending_style)
+    print(f"📜 Generated Title: {script_data['title']}")
+    
+    full_text = f"{script_data['hook']} {script_data['body_script']} {script_data['ending']}"
+    
+    # Update State for duplicate prevention
+    state["recent_titles"].append(script_data['title'])
+    if len(state["recent_titles"]) > 40:
+        state["recent_titles"].pop(0)
+    save_state(state)
+    
+    # 3. Audio Generation (Edge TTS)
+    voice = random.choice(TTS_VOICES)
+    raw_audio_path = OUTPUT_DIR / "tts_raw.mp3"
+    final_audio_path = OUTPUT_DIR / "audio_mixed.mp3"
+    
+    asyncio.run(generate_audio(full_text, voice, str(raw_audio_path)))
+    add_background_music(raw_audio_path, final_audio_path)
+    
+    # 4. Image Generation
+    img_path = OUTPUT_DIR / "bg_image.jpg"
+    try:
+        fetch_pollinations_image(script_data["image_prompt"], str(img_path))
+    except Exception as e:
+        print(f"⚠️ Image generation completely failed: {e}. Using fallback.")
+        create_fallback_image(str(img_path))
+        
+    # 5. Video Assembly (MoviePy)
+    print("🎬 Assembling Video...")
+    audio_clip = AudioFileClip(str(final_audio_path))
+    image_clip = ImageClip(str(img_path)).with_duration(audio_clip.duration)
+    
+    # Simple caption clip in center
+    txt_clip = TextClip(
+        font=CAPTION_FONT_PATH,
+        text=script_data['title'],
+        font_size=70,
+        color='white',
+        stroke_color='black',
+        stroke_width=3,
+        method='caption',
+        size=(VIDEO_W - 100, None)
+    ).with_position('center').with_duration(audio_clip.duration)
+    
+    video = CompositeVideoClip([image_clip, txt_clip])
+    video = video.with_audio(audio_clip)
+    
+    output_video_path = OUTPUT_DIR / f"final_short_{int(time.time())}.mp4"
+    video.write_videofile(
+        str(output_video_path),
+        fps=30,
+        codec="libx264",
+        audio_codec="aac",
+        logger=None
     )
-    upload_result = youtube_upload.upload_video(
-        file_path=str(final_path),
-        title=script["title"],
-        description=description,
-        tags=[h.replace("#", "") for h in script["hashtags"]],
-        privacy_status=privacy_status,
-    )
-    video_id = upload_result["id"]
-    thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-
-    supabase_client.log_video(
-        youtube_id=video_id,
-        title=script["title"],
-        description=description,
-        hashtags=script["hashtags"],
-        thumbnail_url=thumbnail_url,
-        topic=topic,
-        status=privacy_status,
-    )
-    # NOTE: category and ending_style are tracked locally (printed above)
-    # but not yet logged to Supabase — log_video()'s current signature in
-    # supabase_client.py doesn't accept them. The category-weighting
-    # feature falls back to the seeded 55/45 split until that function is
-    # updated to store and return these fields.
-
-    print(f"\nDone: {final_path}")
-    print(f"YouTube ({privacy_status}): https://youtu.be/{video_id}")
-    print("Review and publish from the dashboard.")
-    return final_path
-
+    
+    # 6. Upload
+    is_public = random.random() < PUBLIC_PUBLISH_CHANCE
+    privacy_status = "public" if is_public else "unlisted"
+    print(f"⬆️ Uploading to YouTube as {privacy_status}...")
+    
+    try:
+        video_id = youtube_upload.upload_video(
+            file_path=str(output_video_path),
+            title=script_data["title"],
+            description=f"Topic: {topic_data['topic']}\n#shorts #facts #{topic_data['category']}",
+            privacy=privacy_status
+        )
+        print(f"✅ Uploaded successfully! Video ID: {video_id}")
+        
+        # 7. Log to Supabase for A/B Testing
+        supabase_client.log_video(
+            video_id=video_id,
+            title=script_data["title"],
+            category=topic_data["category"],
+            ending_style=ending_style,
+            is_public=is_public
+        )
+        print("📊 Logged to Supabase.")
+        
+    except Exception as e:
+        print(f"❌ Upload or logging failed: {e}")
 
 if __name__ == "__main__":
-    run_pipeline()
+    main()
