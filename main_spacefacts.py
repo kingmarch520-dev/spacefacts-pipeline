@@ -8,12 +8,12 @@ TWO LANES ONLY — space/physics and history.
 
 TARGET LENGTH: 20-30 seconds (60-75 words, 4 scenes).
 
-PERFORMANCE TRACKING: none. You check YouTube Studio yourself.
+PERFORMANCE TRACKING: none. Check YouTube Studio yourself.
 
-GEMINI QUOTA HANDLING: free tier on gemini-3.6-flash is 5 requests
-per minute per project. Manual re-runs cluster easily and trip it.
-Pipeline reads Gemini's "retry in Ns" hint, sleeps that long, and
-retries once before giving up.
+GEMINI QUOTA HANDLING: model fallback chain. When one model's
+quota is exhausted, next model in chain is tried (each model has
+its own per-project quota pool). Per-minute quota errors sleep
+briefly and retry; per-day errors skip straight to the next model.
 
 REQUIRED INSTALLS (Colab + GitHub Actions pip line):
     !pip install google-generativeai edge-tts moviepy pillow requests --quiet
@@ -57,18 +57,36 @@ TTS_VOICES = [
     "en-US-AvaMultilingualNeural",
 ]
 
+# How often each lane gets picked. Hand-edit after looking at Studio
+# if one lane is clearly pulling better. Values don't need to sum to
+# 1.0; they get normalized at selection time.
 CATEGORY_WEIGHTS = {
     "space": 0.55,
     "history": 0.45,
 }
 
+# Odds that a given run's video goes public instead of unlisted.
 PUBLIC_PUBLISH_CHANCE = 0.5
+
+# Models tried in order when the previous one's quota is exhausted.
+# Each Gemini model has its own per-project quota pool, so a fallback
+# model usually still has room when the primary is capped.
+GEMINI_MODEL_CHAIN = [
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+]
 
 # ------------------------------------------------------------------
 # INSPIRATION TRANSCRIPTS
 # ------------------------------------------------------------------
+# Style references fed into the script prompt. Match RHYTHM, not
+# content. Both trimmed to ~65-75 words to anchor the model on a
+# short rhythm. Paste raw — _clean_transcript() below strips
+# [Music], >>, and timestamp artifacts.
+# ------------------------------------------------------------------
 
 INSPIRATION_TRANSCRIPTS = [
+    # History lane — setup + conflict + one specific detail.
     """
 The first time 80,000 people watched Dick Fosbury jump, they laughed.
 4 hours later, the stadium was dead silent. Back then, there were four
@@ -77,6 +95,10 @@ way that felt natural to him. And every meet, that jump of his got a
 little weirder and went a little higher. He walked in wearing two
 different shoes.
 """,
+
+    # Space lane — best performer, tightened. Keeps every beat: hook,
+    # real number, turn to the lab, payoff number, translation,
+    # callback, pun.
     """
 Deep space seems freezing, but it isn't even close to the coldest
 place in the universe. The void sits around 3 Kelvin, warmed by
@@ -90,10 +112,11 @@ it's zero K.
 ]
 
 # ------------------------------------------------------------------
-# TOPIC POOL
+# TOPIC POOL — space/physics + history only
 # ------------------------------------------------------------------
 
 TOPIC_POOL = [
+    # --- space / physics ---
     {"topic": "gravitational time dilation near a black hole", "category": "space"},
     {"topic": "what a neutron star's density actually means", "category": "space"},
     {"topic": "why the observable universe has an edge", "category": "space"},
@@ -122,6 +145,8 @@ TOPIC_POOL = [
     {"topic": "how far the Oort Cloud actually extends past the planets", "category": "space"},
     {"topic": "what would happen to Earth if Jupiter disappeared", "category": "space"},
     {"topic": "how a compass would actually behave on Mars", "category": "space"},
+
+    # --- history ---
     {"topic": "how the Antikythera mechanism baffled experts for a century", "category": "history"},
     {"topic": "how the pyramids at Giza were actually built without modern tools", "category": "history"},
     {"topic": "what really happened to the Library of Alexandria", "category": "history"},
@@ -166,15 +191,15 @@ def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-def get_category_topics(category: str) -> list:
+def get_category_topics(category):
     return [t for t in TOPIC_POOL if t["category"] == category]
 
 
-def get_recent_titles() -> list:
+def get_recent_titles():
     return load_state().get("recent_titles", [])
 
 
-def record_used_title(title: str):
+def record_used_title(title):
     state = load_state()
     recent = state.get("recent_titles", [])
     recent.append(title)
@@ -183,6 +208,13 @@ def record_used_title(title: str):
 
 
 def get_next_topic():
+    """
+    Per-category round-robin. Each category tracks its own position
+    independently; "order" is a shuffled permutation regenerated
+    fresh each time a full pass completes, so you get variety in the
+    sequence too while still guaranteeing every topic is used
+    exactly once before any repeat.
+    """
     state = load_state()
     state.setdefault("category_progress", {})
 
@@ -223,77 +255,123 @@ about either a space/physics fact or a strange piece of real history.
 ENDING STYLE FOR THIS SCRIPT: {ending_style}
 
 HARD LENGTH LIMITS — do not exceed these:
-  - Total narration: 60-75 words.
+  - Total narration: 60-75 words. Count them. A 75-word script runs
+    about 30 seconds spoken; anything longer and the video is too
+    long for the retention math to work in its favor.
   - Scenes: 4 scenes, 5 absolute maximum (including the final scene).
+    If you find yourself needing a 6th scene, you're explaining too
+    much — cut the weakest fact instead.
   - Hook: 8 words or fewer (see below).
 
 WHY LENGTH MATTERS — average view duration is judged as a PERCENTAGE
-of the clip, not as raw seconds. Shorter videos make the retention
-bar physically easier to clear. Do not pad.
+of the clip, not as raw seconds. Hitting 100% on a 20-second video
+means holding attention for 20 seconds; hitting it on a 45-second
+video means holding attention for 45. Same ratio, twice the work.
+Shorter videos make the retention bar physically easier to clear.
+Do not pad.
 
 RETENTION TARGETS:
-  - Swipe rate must be 20% or LOWER. Controlled by the hook.
+  - Swipe rate must be 20% or LOWER. Controlled entirely by the hook.
   - Average view duration must be 100% of clip length or more.
 
 Rules for how it should sound:
-- Write like you're explaining something wild to a friend.
+- Write like you're explaining something wild to a friend, not
+  narrating a documentary.
 - Use contractions (it's, you'd, that's, don't).
 - Vary sentence length: mix short punchy lines with one longer
   explanatory line.
-- Do NOT use rhetorical filler like "this isn't science fiction, it's
-  reality" or "prepare to have your mind blown."
-- Do NOT stack intensifiers. Pick ONE strong word max per sentence.
-- Include exactly one moment of genuine surprise or disbelief.
+- Do NOT use rhetorical filler like "this isn't science fiction,
+  it's reality" or "prepare to have your mind blown."
+- Do NOT stack intensifiers (incredibly, absolutely, insanely). Pick
+  ONE strong word max per sentence, and only when it's earned.
+- Include exactly one moment of genuine surprise or disbelief,
+  phrased like a reaction, not a lecture.
 - Deliver the core fact clearly before the final scene.
 - When you cite a number, ALWAYS translate it into a comparison or
   ordinary reference in the same breath. "38 pico Kelvins" means
   nothing to a viewer; "38 trillionths of a degree above absolute
-  zero" does.
+  zero" does. A number without a translation is a number the viewer
+  will not remember.
 
-HOOK — first scene's narration. Must be fully spoken within 2.5
-seconds (roughly 8 words or fewer). Use ONE of these five patterns:
-  1. Compare the extreme to something ordinary: "We built something
-     colder than deep space." (Strongest pattern.)
-  2. Lead with a specific number: "One teaspoon would weigh six
-     billion tons."
-  3. Direct address with personal stake: "You wouldn't last one
-     second down there."
-  4. False premise, immediate correction: "Everyone thinks space is
-     empty. It's not even close."
-  5. Blunt fact fragment: "This star could swallow our solar system."
-Prefer pattern 1 when an apt comparison exists.
-Do NOT use "did you know" or "here's a fact that will blow your mind."
-Do NOT start with a subordinate clause ("In the depths of...").
+HOOK — the first scene's narration. Must be fully spoken within 2.5
+seconds (roughly 8 words or fewer), because that is the window in
+which the viewer's finger decides whether to swipe.
 
-ENDING:
-- If ending_style is "loop": FINAL scene ends mid-thought or leads
-  into the first word of the hook. No joke, no summary, no moral.
-- If ending_style is "joke": FINAL scene is a short pun directly
-  related to the fact. Connect it to the specific number or
+Use ONE of these five patterns, whichever fits the topic best:
+  1. Compare the extreme to something ordinary the viewer already has
+     a mental reference for. This is the strongest pattern — it's
+     what the channel's best-performing video used:
+     e.g. "We built something colder than deep space."
+  2. Lead with a specific number or stat before any setup:
+     e.g. "One teaspoon of this would weigh six billion tons."
+  3. Direct address framed as a personal stake:
+     e.g. "You wouldn't even last one second down there."
+  4. False premise, immediate correction:
+     e.g. "Everyone thinks space is empty. It's not even close."
+  5. Blunt, ominous fact fragment, no lead-in at all:
+     e.g. "This star could swallow our entire solar system."
+Prefer pattern 1 when a genuinely apt comparison exists.
+Do NOT use generic hook filler like "did you know" or "here's a fact
+that will blow your mind."
+Do NOT start with a subordinate clause ("In the depths of...",
+"Somewhere in the universe...") — those push the actual hook past
+the swipe window.
+
+ENDING — follow whichever style is set above:
+- If ending_style is "loop": the FINAL scene must end mid-thought or
+  lead seamlessly into the very first word of the hook, so the video
+  loops endlessly with no visible seam. No joke, no summary, no
+  moral. Example: hook is "...is why you can never touch a black
+  hole." -> final scene is "And that terrifying reality..." (loops
+  back to hook).
+- If ending_style is "joke": the FINAL scene must be a short joke or
+  pun directly related to the fact — one line, genuinely funny, not
+  a generic "dad joke for the sake of it." If a clean pun exists in
+  the topic, prefer that over a generic joke. The strongest joke
+  endings connect the pun directly back to the specific number or
   comparison the video just established.
 
-TITLE — under 60 characters. Curiosity-gap, not flat description.
-Weak: "Facts About Deep Ocean Darkness"
-Strong: "The Ocean Depth Where Light Physically Can't Exist"
+TITLE — under 60 characters. Use a curiosity-gap framing, not a
+flat description:
+  Weak:  "Facts About Deep Ocean Darkness"
+  Strong: "The Ocean Depth Where Light Physically Can't Exist"
 
-Also return "title_emphasis": 2-4 words from the title to highlight.
+Also return a "title_emphasis" field: the substring of your title
+that a thumbnail renderer should highlight in a different color.
+Pick the one phrase that carries the whole hook of the title (2-4
+words). e.g. for "The Ocean Depth Where Light Physically Can't
+Exist" the emphasis would be "Can't Exist".
 
-Favor plain, dry phrasing. Avoid "terrifying," "insane," "shocking."
+Favor plain, dry, factual phrasing over dramatic adjectives. On this
+channel, "Why Space is Completely Silent" outperformed "Why Space Is
+Terrifyingly Silent" on the same topic — the flat version won. Avoid
+"terrifying," "insane," "shocking" in the title itself.
 
-For each scene provide:
-- visual_type: "literal" (real footage exists) or "abstract" (no
-  real footage).
-- visual_query: 3-6 words for literal, longer descriptive prompt for
-  abstract.
+Break the script into scenes. Each scene is one or two sentences of
+narration, including the final scene. For each scene, also provide
+a visual:
+- visual_type: "literal" if real stock footage of this exists
+- visual_type: "abstract" if it's a concept with no real footage
+- visual_query: for "literal", a 3-6 word stock footage search term.
+  For "abstract", a descriptive AI image generation prompt (longer
+  is fine, be specific and cinematic).
+- For a "joke" ending, pick whichever visual actually supports the
+  punchline (often literal — a simple relevant clip works better
+  than an abstract image for comedic timing).
 
-Return ONLY valid JSON:
+Return ONLY valid JSON, no markdown fences, no commentary, in this
+exact shape:
 
 {{
-  "title": "...",
-  "title_emphasis": "...",
-  "hook": "...",
+  "title": "short punchy YouTube title, under 60 characters",
+  "title_emphasis": "2-4 word substring of title to highlight",
+  "hook": "the first scene's narration — spoken in <= 2.5 seconds",
   "scenes": [
-    {{"narration": "...", "visual_type": "literal", "visual_query": "..."}}
+    {{
+      "narration": "...",
+      "visual_type": "literal",
+      "visual_query": "..."
+    }}
   ],
   "hashtags": ["#shorts", "#space", "#facts"]
 }}
@@ -305,7 +383,9 @@ Topic: {topic}
 """
 
 
-def _clean_transcript(raw: str) -> str:
+def _clean_transcript(raw):
+    """Strips [Music], [Applause], >> markers, timestamps, and
+    blank-line runs that transcript sites leave in."""
     text = raw
     text = re.sub(r"\[[^\]]*\]", "", text)
     text = re.sub(r"^\s*>>\s*", "", text, flags=re.M)
@@ -314,7 +394,9 @@ def _clean_transcript(raw: str) -> str:
     return text.strip()
 
 
-def _build_style_reference_block() -> str:
+def _build_style_reference_block():
+    """Turns INSPIRATION_TRANSCRIPTS into a concrete style-reference
+    block for the prompt."""
     if not INSPIRATION_TRANSCRIPTS:
         return ""
 
@@ -327,32 +409,53 @@ def _build_style_reference_block() -> str:
     return (
         "STYLE REFERENCE — these are transcripts of shorts that went "
         "viral. Match their RHYTHM: how fast the first sentence lands, "
-        "how short the sentences are, how quickly the payoff arrives. "
-        "Do NOT copy their content, wording, or topic — only the "
-        "pacing. If a rule above conflicts with their style, the rule "
-        "above wins.\n\n"
+        "how short the sentences are, how quickly the payoff arrives, "
+        "how they transition between beats, whether there's a "
+        "callback. Do NOT copy their content, wording, or topic — "
+        "only the pacing. If a rule above conflicts with their style, "
+        "the rule above wins.\n\n"
         + joined
     )
 
 
-def _is_transient_gemini_error(e) -> bool:
+def _is_quota_error(e):
     msg = str(e)
-    return not any(
-        marker in msg for marker in ("RESOURCE_EXHAUSTED", "429", "quota")
+    return any(
+        marker in msg
+        for marker in ("RESOURCE_EXHAUSTED", "429", "quota")
     )
 
 
-def _extract_retry_delay(e) -> float | None:
+def _is_transient_gemini_error(e):
+    """Non-quota errors (5xx, network) get fast retries; quota errors
+    bubble up to the model chain instead."""
+    return not _is_quota_error(e)
+
+
+def _extract_retry_delay(e):
     m = re.search(r"retry in (\d+(?:\.\d+)?)s", str(e))
     return float(m.group(1)) if m else None
 
 
+def _is_daily_quota_error(e):
+    """Per-day quota errors can't be fixed by sleeping — must try a
+    different model or wait until midnight Pacific."""
+    return "PerDayPerProject" in str(e)
+
+
 def _call_gemini_with_quota_fallback(call_fn):
+    """
+    Runs call_fn(). On a per-minute quota error, sleeps the delay
+    Gemini hints + buffer, retries once. On a per-day quota error,
+    raises immediately so the model chain can try the next model.
+    """
     try:
         return call_fn()
     except Exception as e:
-        msg = str(e)
-        if not any(m in msg for m in ("RESOURCE_EXHAUSTED", "429", "quota")):
+        if not _is_quota_error(e):
+            raise
+
+        if _is_daily_quota_error(e):
             raise
 
         delay = _extract_retry_delay(e)
@@ -360,21 +463,40 @@ def _call_gemini_with_quota_fallback(call_fn):
             raise
 
         delay = min(delay, 90.0) + 5.0
-        print(f"      (quota hit — sleeping {delay:.0f}s for window to "
-              f"clear, then retrying once)")
+        print(f"      (per-minute quota hit — sleeping {delay:.0f}s, "
+              f"then retrying once)")
         time.sleep(delay)
         return call_fn()
 
 
-def generate_script(topic: str, ending_style: str, recent_titles: list = None) -> dict:
+def retry_with_backoff(fn, *args, retries=3, base_delay=3,
+                       should_retry=None, **kwargs):
+    """Generic retry helper used for Gemini and Pollinations calls."""
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if should_retry is not None and not should_retry(e):
+                print(f"      (not retrying — error isn't transient: {e})")
+                raise
+            if attempt < retries - 1:
+                delay = base_delay * (2 ** attempt)
+                print(f"      (retrying after error: {e} — waiting {delay}s)")
+                time.sleep(delay)
+    raise last_exc
+
+
+def generate_script(topic, ending_style, recent_titles=None):
     if recent_titles:
         titles_list = "\n".join(f"- {t}" for t in recent_titles)
         recent_titles_block = (
             "AVOID RESEMBLING RECENT VIDEOS — these titles were made "
             "recently on this channel. Even if today's topic is "
             "technically different, do not produce a hook, angle, or "
-            "framing that would feel like a repeat of any of these to a "
-            "viewer who's seen them:\n" + titles_list
+            "framing that would feel like a repeat of any of these to "
+            "a viewer who's seen them:\n" + titles_list
         )
     else:
         recent_titles_block = ""
@@ -390,20 +512,39 @@ def generate_script(topic: str, ending_style: str, recent_titles: list = None) -
 
     import google.generativeai as genai
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-3.6-flash")
 
-    def _call_gemini():
-        return model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"},
+    def _generate_with_model(model_name):
+        model = genai.GenerativeModel(model_name)
+
+        def _call():
+            return model.generate_content(
+                prompt,
+                generation_config={"response_mime_type": "application/json"},
+            )
+
+        return _call_gemini_with_quota_fallback(
+            lambda: retry_with_backoff(
+                _call, retries=3, base_delay=5,
+                should_retry=_is_transient_gemini_error,
+            )
         )
 
-    response = _call_gemini_with_quota_fallback(
-        lambda: retry_with_backoff(
-            _call_gemini, retries=3, base_delay=5,
-            should_retry=_is_transient_gemini_error,
-        )
-    )
+    response = None
+    last_error = None
+    for model_name in GEMINI_MODEL_CHAIN:
+        try:
+            print(f"      (trying model: {model_name})")
+            response = _generate_with_model(model_name)
+            break
+        except Exception as e:
+            if not _is_quota_error(e):
+                raise
+            last_error = e
+            print(f"      ({model_name} quota-exhausted — trying next)")
+            continue
+
+    if response is None:
+        raise last_error or RuntimeError("all Gemini models exhausted")
 
     data = json.loads(response.text)
 
@@ -423,13 +564,13 @@ def generate_script(topic: str, ending_style: str, recent_titles: list = None) -
 # TTS
 # ------------------------------------------------------------------
 
-async def _synthesize(text: str, voice: str, out_path: Path):
+async def _synthesize(text, voice, out_path):
     import edge_tts
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(str(out_path))
 
 
-def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
+def synthesize_scene_audio(scenes, run_dir):
     from moviepy import AudioFileClip
 
     voice = random.choice(TTS_VOICES)
@@ -447,25 +588,7 @@ def synthesize_scene_audio(scenes: list, run_dir: Path) -> list:
 # VISUALS
 # ------------------------------------------------------------------
 
-def retry_with_backoff(fn, *args, retries=3, base_delay=3,
-                       should_retry=None, **kwargs):
-    last_exc = None
-    for attempt in range(retries):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            last_exc = e
-            if should_retry is not None and not should_retry(e):
-                print(f"      (not retrying — error isn't transient: {e})")
-                raise
-            if attempt < retries - 1:
-                delay = base_delay * (2 ** attempt)
-                print(f"      (retrying after error: {e} — waiting {delay}s)")
-                time.sleep(delay)
-    raise last_exc
-
-
-def fetch_pexels_video(query: str, out_path: Path):
+def fetch_pexels_video(query, out_path):
     headers = {"Authorization": PEXELS_API_KEY}
     url = "https://api.pexels.com/videos/search"
     params = {"query": query, "orientation": "portrait", "per_page": 5}
@@ -485,7 +608,7 @@ def fetch_pexels_video(query: str, out_path: Path):
     return out_path
 
 
-def _fetch_pollinations_image_once(prompt: str, out_path: Path) -> Path:
+def _fetch_pollinations_image_once(prompt, out_path):
     import urllib.parse
     encoded = urllib.parse.quote(prompt)
     url = (f"https://image.pollinations.ai/prompt/{encoded}"
@@ -505,7 +628,8 @@ def _fetch_pollinations_image_once(prompt: str, out_path: Path) -> Path:
     return out_path
 
 
-def _generate_fallback_image(prompt: str, out_path: Path) -> Path:
+def _generate_fallback_image(prompt, out_path):
+    """Last-resort visual if Pollinations is down. Local-only."""
     from PIL import Image, ImageDraw, ImageFont
     import textwrap
 
@@ -531,7 +655,7 @@ def _generate_fallback_image(prompt: str, out_path: Path) -> Path:
     return out_path
 
 
-def fetch_pollinations_image(prompt: str, out_path: Path) -> Path:
+def fetch_pollinations_image(prompt, out_path):
     try:
         return retry_with_backoff(
             _fetch_pollinations_image_once, prompt, out_path
@@ -541,7 +665,7 @@ def fetch_pollinations_image(prompt: str, out_path: Path) -> Path:
         return _generate_fallback_image(prompt, out_path)
 
 
-def fetch_visual_for_scene(scene: dict, index: int, run_dir: Path) -> dict:
+def fetch_visual_for_scene(scene, index, run_dir):
     if scene["visual_type"] == "literal":
         out_path = run_dir / f"visual_{index}.mp4"
         result = fetch_pexels_video(scene["visual_query"], out_path)
@@ -583,8 +707,7 @@ def add_background_music(final_clip):
     return final_clip.with_audio(combined)
 
 
-def build_video(script: dict, audio_clips: list, visuals: list,
-                run_dir: Path) -> Path:
+def build_video(script, audio_clips, visuals, run_dir):
     from moviepy import (
         AudioFileClip, ImageClip, VideoFileClip, CompositeVideoClip,
         TextClip, concatenate_videoclips, vfx,
@@ -592,7 +715,8 @@ def build_video(script: dict, audio_clips: list, visuals: list,
 
     if not Path(CAPTION_FONT_PATH).exists():
         raise FileNotFoundError(
-            f"CAPTION_FONT_PATH does not exist: {CAPTION_FONT_PATH}."
+            f"CAPTION_FONT_PATH does not exist: {CAPTION_FONT_PATH}. "
+            "Commit your font file to the repo root, next to main.py."
         )
 
     scene_clips = []
