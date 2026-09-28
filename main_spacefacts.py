@@ -4,15 +4,9 @@ SPACE/PHYSICS + HISTORY FACTS CHANNEL — AUTOMATED SHORTS PIPELINE
 ==================================================================
 Built for Google Colab / GitHub Actions.
 
-TWO LANES ONLY — space/physics and history.
+SDK: google-genai (the current package).
 
-TARGET LENGTH: 20-30 seconds (60-75 words, 4 scenes).
-
-SDK: google-genai (the current package). The old
-google-generativeai package is deprecated and no longer receives
-updates — do not switch back.
-
-REQUIRED INSTALLS (Colab + GitHub Actions pip line):
+REQUIRED INSTALLS:
     !pip install google-genai edge-tts moviepy pillow requests --quiet
 ==================================================================
 """
@@ -25,6 +19,9 @@ import random
 import asyncio
 import requests
 from pathlib import Path
+
+from google import genai
+from google.genai import types, errors as genai_errors
 
 import youtube_upload
 
@@ -61,7 +58,6 @@ CATEGORY_WEIGHTS = {
 
 PUBLIC_PUBLISH_CHANCE = 0.5
 
-# Single model. No fallback chain.
 GEMINI_MODEL = "gemini-3.8-flash"
 
 # ------------------------------------------------------------------
@@ -69,7 +65,6 @@ GEMINI_MODEL = "gemini-3.8-flash"
 # ------------------------------------------------------------------
 
 INSPIRATION_TRANSCRIPTS = [
-    # History lane — setup + conflict + one specific detail.
     """
 The first time 80,000 people watched Dick Fosbury jump, they laughed.
 4 hours later, the stadium was dead silent. Back then, there were four
@@ -78,8 +73,6 @@ way that felt natural to him. And every meet, that jump of his got a
 little weirder and went a little higher. He walked in wearing two
 different shoes.
 """,
-
-    # Space lane — best performer, tightened.
     """
 Deep space seems freezing, but it isn't even close to the coldest
 place in the universe. The void sits around 3 Kelvin, warmed by
@@ -93,7 +86,7 @@ it's zero K.
 ]
 
 # ------------------------------------------------------------------
-# TOPIC POOL — space/physics + history only
+# TOPIC POOL
 # ------------------------------------------------------------------
 
 TOPIC_POOL = [
@@ -233,8 +226,6 @@ HARD LENGTH LIMITS — do not exceed these:
     about 30 seconds spoken; anything longer and the video is too
     long for the retention math to work in its favor.
   - Scenes: 4 scenes, 5 absolute maximum (including the final scene).
-    If you find yourself needing a 6th scene, you're explaining too
-    much — cut the weakest fact instead.
   - Hook: 8 words or fewer (see below).
 
 WHY LENGTH MATTERS — average view duration is judged as a PERCENTAGE
@@ -246,99 +237,65 @@ RETENTION TARGETS:
   - Average view duration must be 100% of clip length or more.
 
 Rules for how it should sound:
-- Write like you're explaining something wild to a friend, not
-  narrating a documentary.
+- Write like you're explaining something wild to a friend.
 - Use contractions (it's, you'd, that's, don't).
 - Vary sentence length: mix short punchy lines with one longer
   explanatory line.
 - Do NOT use rhetorical filler like "this isn't science fiction,
   it's reality" or "prepare to have your mind blown."
-- Do NOT stack intensifiers (incredibly, absolutely, insanely). Pick
-  ONE strong word max per sentence, and only when it's earned.
-- Include exactly one moment of genuine surprise or disbelief,
-  phrased like a reaction, not a lecture.
+- Do NOT stack intensifiers. Pick ONE strong word max per sentence.
+- Include exactly one moment of genuine surprise or disbelief.
 - Deliver the core fact clearly before the final scene.
 - When you cite a number, ALWAYS translate it into a comparison or
-  ordinary reference in the same breath. "38 pico Kelvins" means
-  nothing to a viewer; "38 trillionths of a degree above absolute
-  zero" does. A number without a translation is a number the viewer
-  will not remember.
+  ordinary reference in the same breath.
 
 HOOK — the first scene's narration. Must be fully spoken within 2.5
-seconds (roughly 8 words or fewer), because that is the window in
-which the viewer's finger decides whether to swipe.
+seconds (roughly 8 words or fewer).
 
-Use ONE of these five patterns, whichever fits the topic best:
+Use ONE of these five patterns:
   1. Compare the extreme to something ordinary the viewer already has
-     a mental reference for. This is the strongest pattern — it's
-     what the channel's best-performing video used:
+     a mental reference for. Strongest pattern:
      e.g. "We built something colder than deep space."
-  2. Lead with a specific number or stat before any setup:
-     e.g. "One teaspoon of this would weigh six billion tons."
-  3. Direct address framed as a personal stake:
-     e.g. "You wouldn't even last one second down there."
-  4. False premise, immediate correction:
-     e.g. "Everyone thinks space is empty. It's not even close."
-  5. Blunt, ominous fact fragment, no lead-in at all:
-     e.g. "This star could swallow our entire solar system."
-Prefer pattern 1 when a genuinely apt comparison exists.
-Do NOT use generic hook filler like "did you know" or "here's a fact
-that will blow your mind."
-Do NOT start with a subordinate clause ("In the depths of...",
-"Somewhere in the universe...") — those push the actual hook past
-the swipe window.
+  2. Lead with a specific number: e.g. "One teaspoon would weigh six
+     billion tons."
+  3. Direct address with personal stake: "You wouldn't last one
+     second down there."
+  4. False premise, immediate correction: "Everyone thinks space is
+     empty. It's not even close."
+  5. Blunt fact fragment: "This star could swallow our solar system."
+Prefer pattern 1 when an apt comparison exists.
+Do NOT use "did you know" or "here's a fact that will blow your mind."
+Do NOT start with a subordinate clause ("In the depths of...").
 
-ENDING — follow whichever style is set above:
-- If ending_style is "loop": the FINAL scene must end mid-thought or
-  lead seamlessly into the very first word of the hook, so the video
-  loops endlessly with no visible seam. No joke, no summary, no
-  moral. Example: hook is "...is why you can never touch a black
-  hole." -> final scene is "And that terrifying reality..." (loops
-  back to hook).
-- If ending_style is "joke": the FINAL scene must be a short joke or
-  pun directly related to the fact — one line, genuinely funny, not
-  a generic "dad joke for the sake of it." If a clean pun exists in
-  the topic, prefer that over a generic joke. The strongest joke
-  endings connect the pun directly back to the specific number or
+ENDING:
+- If ending_style is "loop": FINAL scene ends mid-thought or leads
+  into the first word of the hook. No joke, no summary, no moral.
+- If ending_style is "joke": FINAL scene is a short pun directly
+  related to the fact, connected to the specific number or
   comparison the video just established.
 
-TITLE — under 60 characters. Use a curiosity-gap framing, not a
-flat description:
+TITLE — under 60 characters. Curiosity-gap, not flat description.
   Weak:  "Facts About Deep Ocean Darkness"
   Strong: "The Ocean Depth Where Light Physically Can't Exist"
 
-Also return a "title_emphasis" field: the substring of your title
-that a thumbnail renderer should highlight in a different color.
-Pick the one phrase that carries the whole hook of the title (2-4
-words).
+Also return "title_emphasis": 2-4 words from the title to highlight.
 
-Favor plain, dry, factual phrasing over dramatic adjectives. On this
-channel, "Why Space is Completely Silent" outperformed "Why Space Is
-Terrifyingly Silent" on the same topic — the flat version won. Avoid
-"terrifying," "insane," "shocking" in the title itself.
+Favor plain, dry phrasing. Avoid "terrifying," "insane," "shocking."
 
-Break the script into scenes. Each scene is one or two sentences of
-narration, including the final scene. For each scene, also provide
-a visual:
-- visual_type: "literal" if real stock footage of this exists
-- visual_type: "abstract" if it's a concept with no real footage
-- visual_query: for "literal", a 3-6 word stock footage search term.
-  For "abstract", a descriptive AI image generation prompt (longer
-  is fine, be specific and cinematic).
+For each scene provide:
+- visual_type: "literal" (real footage exists) or "abstract" (no
+  real footage).
+- visual_query: 3-6 words for literal, longer descriptive prompt for
+  abstract.
 
-Return ONLY valid JSON, no markdown fences, no commentary, in this
-exact shape:
+Return ONLY valid JSON, no markdown fences, no commentary:
 
 {{
-  "title": "short punchy YouTube title, under 60 characters",
-  "title_emphasis": "2-4 word substring of title to highlight",
-  "hook": "the first scene's narration — spoken in <= 2.5 seconds",
+  "title": "...",
+  "title_emphasis": "...",
+  "hook": "...",
   "scenes": [
-    {{
-      "narration": "...",
-      "visual_type": "literal",
-      "visual_query": "..."
-    }}
+    {{"narration": "...", "visual_type": "literal", "visual_query": "..."}}
   ],
   "hashtags": ["#shorts", "#space", "#facts"]
 }}
@@ -372,27 +329,15 @@ def _build_style_reference_block():
     return (
         "STYLE REFERENCE — these are transcripts of shorts that went "
         "viral. Match their RHYTHM: how fast the first sentence lands, "
-        "how short the sentences are, how quickly the payoff arrives, "
-        "how they transition between beats, whether there's a "
-        "callback. Do NOT copy their content, wording, or topic — "
-        "only the pacing. If a rule above conflicts with their style, "
-        "the rule above wins.\n\n"
+        "how short the sentences are, how quickly the payoff arrives. "
+        "Do NOT copy their content, wording, or topic — only the "
+        "pacing. If a rule above conflicts with their style, the rule "
+        "above wins.\n\n"
         + joined
     )
 
 
-# ------------------------------------------------------------------
-# Gemini error helpers — the new SDK has its own error hierarchy,
-# NOT google.api_core.exceptions. Checking e.code is how you tell
-# a quota error (429) from a model-missing error (404).
-# ------------------------------------------------------------------
-
-from google.genai import errors as genai_errors
-
-
 def _gemini_error_code(e):
-    """Returns the HTTP status code from a google.genai error, or
-    None if it's not a genai error at all."""
     if isinstance(e, genai_errors.APIError):
         return getattr(e, "code", None)
     return None
@@ -402,13 +347,11 @@ def _is_quota_error(e):
     code = _gemini_error_code(e)
     if code == 429:
         return True
-    # Fallback: some errors don't surface a code cleanly
     msg = str(e)
     return "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower()
 
 
 def _is_model_unavailable_error(e):
-    """404 NOT_FOUND — model doesn't exist for this account/project."""
     code = _gemini_error_code(e)
     if code == 404:
         return True
@@ -417,8 +360,6 @@ def _is_model_unavailable_error(e):
 
 
 def _is_transient_gemini_error(e):
-    """Non-quota, non-unavailable errors (5xx, network) get fast
-    retries; everything else raises immediately."""
     if _is_quota_error(e) or _is_model_unavailable_error(e):
         return False
     return True
@@ -430,16 +371,10 @@ def _extract_retry_delay(e):
 
 
 def _is_daily_quota_error(e):
-    """Per-day quota errors can't be fixed by sleeping briefly."""
     return "PerDayPerProject" in str(e)
 
 
 def _call_gemini_with_quota_fallback(call_fn):
-    """
-    On a per-minute quota error, sleeps the delay Gemini hints +
-    buffer and retries once. On a per-day quota error, raises
-    immediately — no amount of sleeping fixes a spent daily budget.
-    """
     try:
         return call_fn()
     except Exception as e:
@@ -500,7 +435,6 @@ def generate_script(topic, ending_style, recent_titles=None):
         style_reference_block=style_reference_block,
     )
 
-    # New SDK: single client object, no configure() call.
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     print(f"      (using model: {GEMINI_MODEL})")
@@ -689,8 +623,7 @@ def build_video(script, audio_clips, visuals, run_dir):
 
     if not Path(CAPTION_FONT_PATH).exists():
         raise FileNotFoundError(
-            f"CAPTION_FONT_PATH does not exist: {CAPTION_FONT_PATH}. "
-            "Commit your font file to the repo root, next to main.py."
+            f"CAPTION_FONT_PATH does not exist: {CAPTION_FONT_PATH}."
         )
 
     scene_clips = []
