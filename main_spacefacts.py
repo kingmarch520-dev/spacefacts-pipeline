@@ -14,6 +14,12 @@ PERFORMANCE TRACKING: none. You check YouTube Studio yourself for
 analytics. Topic selection uses a static weight (space slightly
 favored) that you can hand-edit in CATEGORY_WEIGHTS.
 
+GEMINI QUOTA HANDLING: free tier on gemini-3.6-flash is 5 requests
+per minute per project. Manual re-runs cluster easily and trip it.
+The pipeline now reads Gemini's "retry in Ns" hint, sleeps that
+long, and retries once before giving up — instead of failing the
+whole run on a quota blip.
+
 REQUIRED INSTALLS (Colab + GitHub Actions pip line):
     !pip install google-generativeai edge-tts moviepy pillow requests --quiet
 
@@ -450,6 +456,54 @@ def _is_transient_gemini_error(e) -> bool:
     )
 
 
+def _extract_retry_delay(e) -> float | None:
+    """
+    Gemini's quota errors include a literal 'retry in Ns' string in
+    the error body. Pull it out so we sleep exactly as long as they
+    ask, instead of guessing. Returns None if not present.
+    """
+    m = re.search(r"retry in (\d+(?:\.\d+)?)s", str(e))
+    return float(m.group(1)) if m else None
+
+
+def _call_gemini_with_quota_fallback(call_fn):
+    """
+    Runs call_fn(). On a quota-exhaustion error, reads the delay
+    Gemini tells us to wait, sleeps that long + buffer, and retries
+    once. On any other error, re-raises immediately — the caller's
+    inner retry_with_backoff handles those.
+
+    Why this exists: Gemini's free tier on gemini-3.6-flash is 5
+    requests per minute per project. A 2-runs/day schedule can't hit
+    that, but manual workflow_dispatch triggers cluster easily — two
+    re-runs inside the same minute will. Without this, a single
+    quota blip fails an otherwise-healthy scheduled run.
+
+    Delay is capped at 90s so a run can't sit for minutes waiting on
+    Gemini before the GitHub Actions job timeout (30 min) triggers.
+    If the second attempt also fails, it raises normally — no
+    infinite loops.
+    """
+    try:
+        return call_fn()
+    except Exception as e:
+        msg = str(e)
+        if not any(m in msg for m in ("RESOURCE_EXHAUSTED", "429", "quota")):
+            raise
+
+        delay = _extract_retry_delay(e)
+        if delay is None:
+            # Can't read the hint — better to fail than guess and
+            # sleep an arbitrary amount.
+            raise
+
+        delay = min(delay, 90.0) + 5.0
+        print(f"      (quota hit — sleeping {delay:.0f}s for window to "
+              f"clear, then retrying once)")
+        time.sleep(delay)
+        return call_fn()
+
+
 def generate_script(topic: str, ending_style: str, recent_titles: list = None) -> dict:
     if recent_titles:
         titles_list = "\n".join(f"- {t}" for t in recent_titles)
@@ -484,9 +538,18 @@ def generate_script(topic: str, ending_style: str, recent_titles: list = None) -
             generation_config={"response_mime_type": "application/json"},
         )
 
-    response = retry_with_backoff(
-        _call_gemini, retries=3, base_delay=5,
-        should_retry=_is_transient_gemini_error,
+    # Two layers of retry, deliberately stacked:
+    #   inner — handles transient 5xx / network hiccups with quick backoff
+    #   outer — handles quota-exhaustion by sleeping the exact window
+    # Quota errors are excluded from the inner retry (should_retry
+    # returns False for them) so they bubble straight to the outer
+    # wrapper instead of burning the per-minute budget on useless
+    # fast retries.
+    response = _call_gemini_with_quota_fallback(
+        lambda: retry_with_backoff(
+            _call_gemini, retries=3, base_delay=5,
+            should_retry=_is_transient_gemini_error,
+        )
     )
 
     data = json.loads(response.text)
