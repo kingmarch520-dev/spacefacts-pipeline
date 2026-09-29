@@ -40,9 +40,9 @@ PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
 
 # Gemini models are tried in this order.
 #
-# If a model is unavailable, the pipeline moves to the next one.
-# If a model has a temporary 429/503-style failure, it retries
-# before moving to the next model.
+# IMPORTANT:
+# If a model is unavailable for your API project, the pipeline
+# automatically moves to the next model.
 GEMINI_MODELS = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
@@ -65,9 +65,9 @@ CAPTION_FONT_PATH = str(
 BGM_DIR = Path(__file__).parent / "bgm"
 
 
-# ------------------------------------------------------------------
+# ==================================================================
 # CATEGORY WEIGHTS
-# ------------------------------------------------------------------
+# ==================================================================
 
 CATEGORY_WEIGHTS = {
     "space": 0.55,
@@ -75,9 +75,9 @@ CATEGORY_WEIGHTS = {
 }
 
 
-# ------------------------------------------------------------------
+# ==================================================================
 # EDGE TTS VOICES
-# ------------------------------------------------------------------
+# ==================================================================
 
 TTS_VOICES = [
     "en-GB-RyanNeural",
@@ -332,7 +332,6 @@ def get_next_topic():
     """
     Select the next topic.
 
-    IMPORTANT:
     This function does NOT save progress.
 
     The topic is only marked as used after Gemini successfully
@@ -385,8 +384,11 @@ def get_next_topic():
             progress["order"]
         )
     ):
+
         order = list(
-            range(len(category_topics))
+            range(
+                len(category_topics)
+            )
         )
 
         random.shuffle(order)
@@ -438,6 +440,7 @@ def commit_topic_progress(
 
 
 def record_used_title(title: str):
+
     state = load_state()
 
     recent = state.get(
@@ -453,6 +456,7 @@ def record_used_title(title: str):
 
 
 def get_recent_titles() -> list:
+
     return load_state().get(
         "recent_titles",
         []
@@ -482,6 +486,7 @@ def log_upload(
         "a",
         encoding="utf-8",
     ) as f:
+
         f.write(
             json.dumps(entry)
             + "\n"
@@ -503,19 +508,20 @@ def retry_with_backoff(
     """
     Retry a function using exponential backoff.
 
-    Default:
+    Default delays:
         20s
         40s
         80s
-
-    A small random delay is added to reduce synchronized retries.
     """
 
     last_exc = None
 
-    for attempt in range(retries):
+    for attempt in range(
+        retries
+    ):
 
         try:
+
             return fn(
                 *args,
                 **kwargs
@@ -528,14 +534,21 @@ def retry_with_backoff(
             if should_retry is not None:
 
                 try:
-                    retryable = should_retry(e)
+
+                    retryable = should_retry(
+                        e
+                    )
+
                 except Exception:
+
                     retryable = False
 
                 if not retryable:
+
                     print(
                         f"      Not retrying error: {e}"
                     )
+
                     raise
 
             if attempt >= retries - 1:
@@ -543,7 +556,9 @@ def retry_with_backoff(
 
             delay = (
                 base_delay
-                * (2 ** attempt)
+                * (
+                    2 ** attempt
+                )
             )
 
             delay += random.uniform(
@@ -560,7 +575,9 @@ def retry_with_backoff(
                 f"{delay:.1f}s..."
             )
 
-            time.sleep(delay)
+            time.sleep(
+                delay
+            )
 
     raise last_exc
 
@@ -642,18 +659,18 @@ Return ONLY valid JSON.
 
 Exact shape:
 
-{
+{{
 "title": "short punchy YouTube title, under 60 characters",
 "hook": "the first scene's narration",
 "scenes": [
-{
+{{
 "narration": "...",
 "visual_type": "literal",
 "visual_query": "..."
-}
+}}
 ],
 "hashtags": ["#shorts", "#space", "#facts"]
-}
+}}
 
 Topic: {topic}
 
@@ -661,10 +678,9 @@ Topic: {topic}
 """
 
 
-def is_model_unavailable_error(e) -> bool:
-    """
-    Detect errors meaning the requested Gemini model cannot be used.
-    """
+def is_model_unavailable_error(
+    e
+) -> bool:
 
     msg = str(e).lower()
 
@@ -682,13 +698,9 @@ def is_model_unavailable_error(e) -> bool:
     )
 
 
-def is_gemini_retryable_error(e) -> bool:
-    """
-    Detect transient Gemini/API errors.
-
-    429 / quota / rate-limit errors and temporary server
-    failures should be retried.
-    """
+def is_gemini_retryable_error(
+    e
+) -> bool:
 
     msg = str(e).lower()
 
@@ -711,12 +723,14 @@ def is_gemini_retryable_error(e) -> bool:
         marker in msg
         for marker in transient_markers
     ):
+
         if (
             "429" in msg
             or "resource_exhausted" in msg
             or "quota" in msg
             or "rate limit" in msg
         ):
+
             print(
                 "      Gemini quota/rate limit detected."
             )
@@ -759,10 +773,6 @@ def generate_script(
         ending_style=ending_style,
         recent_titles_block=recent_titles_block,
     )
-
-    # --------------------------------------------------------------
-    # Modern Gemini SDK
-    # --------------------------------------------------------------
 
     from google import genai
 
@@ -822,10 +832,6 @@ def generate_script(
                 raise RuntimeError(
                     "Gemini response was not valid JSON."
                 ) from e
-
-            # ------------------------------------------------------
-            # Validate response
-            # ------------------------------------------------------
 
             if "title" not in data:
 
@@ -891,9 +897,9 @@ def generate_script(
                 f"      Gemini model {model} failed: {e}"
             )
 
-            # If the model doesn't exist / isn't available,
-            # immediately try the next model.
-            if is_model_unavailable_error(e):
+            if is_model_unavailable_error(
+                e
+            ):
 
                 print(
                     f"      Model {model} is unavailable."
@@ -905,9 +911,9 @@ def generate_script(
 
                 continue
 
-            # A temporary failure was already retried by
-            # retry_with_backoff. Move to the next model.
-            if is_gemini_retryable_error(e):
+            if is_gemini_retryable_error(
+                e
+            ):
 
                 print(
                     f"      Model {model} remains unavailable "
@@ -920,7 +926,6 @@ def generate_script(
 
                 continue
 
-            # Permanent/unrecognized error.
             raise
 
     raise RuntimeError(
@@ -938,6 +943,7 @@ async def _synthesize(
     voice: str,
     out_path: Path,
 ):
+
     import edge_tts
 
     communicate = edge_tts.Communicate(
@@ -1170,9 +1176,13 @@ def _generate_fallback_image(
         color=(10, 10, 20),
     )
 
-    draw = ImageDraw.Draw(img)
+    draw = ImageDraw.Draw(
+        img
+    )
 
-    for y in range(VIDEO_H):
+    for y in range(
+        VIDEO_H
+    ):
 
         shade = int(
             10
@@ -1317,22 +1327,20 @@ def fetch_visual_for_scene(
             "path": fallback_path,
         }
 
-    else:
+    out_path = (
+        run_dir
+        / f"visual_{index}.jpg"
+    )
 
-        out_path = (
-            run_dir
-            / f"visual_{index}.jpg"
-        )
+    fetch_pollinations_image(
+        scene["visual_query"],
+        out_path,
+    )
 
-        fetch_pollinations_image(
-            scene["visual_query"],
-            out_path,
-        )
-
-        return {
-            "type": "image",
-            "path": out_path,
-        }
+    return {
+        "type": "image",
+        "path": out_path,
+    }
 
 
 # ==================================================================
@@ -1589,7 +1597,6 @@ def build_video(
         audio_codec="aac",
     )
 
-    # Clean up MoviePy resources.
     try:
         final.close()
     except Exception:
@@ -1696,8 +1703,7 @@ def run_pipeline():
         raise
 
     # --------------------------------------------------------------
-    # IMPORTANT:
-    # Commit topic only AFTER Gemini succeeds.
+    # Mark topic used only after Gemini succeeds.
     # --------------------------------------------------------------
 
     commit_topic_progress(
@@ -1849,7 +1855,7 @@ def run_pipeline():
     video_id = upload_result["id"]
 
     # --------------------------------------------------------------
-    # SAVE SUCCESSFUL UPLOAD
+    # LOG SUCCESSFUL UPLOAD
     # --------------------------------------------------------------
 
     log_upload(
