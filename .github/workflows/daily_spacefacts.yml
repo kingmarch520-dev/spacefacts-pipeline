@@ -1,13 +1,17 @@
-name: Space Facts Automated Pipeline
+name: SpaceFacts Daily Upload
 
 on:
   schedule:
-    - cron: "0 */4 * * *"  # every 4 hours -> 6 uploads/day
+    # 2 uploads per day
+    # 08:00 UTC and 20:00 UTC
+    - cron: "0 8,20 * * *"
+
+  # Allow manual runs from GitHub Actions
   workflow_dispatch: {}
 
 concurrency:
   group: spacefacts-pipeline
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   generate-and-upload:
@@ -15,38 +19,87 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout repo
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ============================================================
+      # PYTHON
+      # ============================================================
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install system dependencies & fonts
+      # ============================================================
+      # SYSTEM DEPENDENCIES
+      # ============================================================
+
+      - name: Install system dependencies and fonts
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+          sudo apt-get update
+          sudo apt-get install -y \
+            ffmpeg \
+            fonts-dejavu-core
+
+      # ============================================================
+      # PYTHON DEPENDENCIES
+      # ============================================================
 
       - name: Install Python dependencies
         run: |
-          pip install google-generativeai edge-tts moviepy pillow requests google-auth-oauthlib
+          python -m pip install --upgrade pip
 
-      - name: Run pipeline
+          pip install \
+            google-genai \
+            edge-tts \
+            moviepy \
+            pillow \
+            requests \
+            google-auth-oauthlib
+
+      # ============================================================
+      # RUN PIPELINE
+      # ============================================================
+
+      - name: Run SpaceFacts pipeline
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-        run: python main.py
 
-      - name: Commit updated state + upload log
+        run: |
+          python main.py
+
+      # ============================================================
+      # SAVE STATE
+      # ============================================================
+
+      - name: Commit updated state and upload log
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state_spacefacts.json upload_log.jsonl || true
+
+          git add state_spacefacts.json upload_log.jsonl
+
           if ! git diff --staged --quiet; then
-            git commit -m "Update state after run [skip ci]"
+            git commit -m "Update SpaceFacts state [skip ci]"
+
             git pull --rebase origin main
+
             git push origin main
+          else
+            echo "No state changes to commit."
           fi
