@@ -1,22 +1,26 @@
 """
-SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v3)
+SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v4)
 
 GitHub Actions / local Python pipeline.
 
 One run:
 1. Pick a topic
-2. Generate a script with Gemini
-3. Generate narration with Edge TTS
-4. Source visuals from Pexels / Pollinations
-5. Assemble the Short with MoviePy
-6. Upload to YouTube as public
+2. Discover available Gemini models
+3. Generate a script with Gemini
+4. Generate narration with Edge TTS
+5. Source visuals from Pexels / Pollinations
+6. Assemble the Short with MoviePy
+7. Upload to YouTube as public
 
 IMPORTANT:
 - Uses the modern google-genai SDK.
-- Gemini transient errors are retried with exponential backoff.
-- Multiple Gemini models are tried automatically.
+- Gemini models are discovered automatically when possible.
+- Multiple Gemini Flash models are tried automatically.
+- Temporary Gemini errors use short exponential backoff.
 - A topic is only marked as used AFTER Gemini successfully
-  generates the script.
+  generates a valid script.
+- The JSON prompt uses escaped braces so .format() cannot
+  accidentally interpret the JSON as Python format fields.
 """
 
 import os
@@ -38,15 +42,22 @@ import youtube_upload
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
 
-# Gemini models are tried in this order.
+# Preferred Gemini model order.
 #
-# IMPORTANT:
-# If a model is unavailable for your API project, the pipeline
-# automatically moves to the next model.
+# The pipeline first asks the API which models are available.
+# It then uses this order for the models that are actually exposed
+# to the API key.
+#
+# If a model is unavailable, it is skipped automatically.
 GEMINI_MODELS = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 ]
 
 STATE_FILE = Path("state_spacefacts.json")
@@ -494,24 +505,29 @@ def log_upload(
 
 
 # ==================================================================
-# RETRY HELPER
+# GENERIC RETRY HELPER
 # ==================================================================
 
 def retry_with_backoff(
     fn,
     *args,
-    retries=4,
-    base_delay=20,
+    retries=3,
+    base_delay=8,
     should_retry=None,
     **kwargs,
 ):
     """
     Retry a function using exponential backoff.
 
-    Default delays:
-        20s
-        40s
-        80s
+    Default Gemini behavior:
+        attempt 1
+        wait ~8s
+        attempt 2
+        wait ~16s
+        attempt 3
+
+    The shorter retry window prevents GitHub Actions from
+    spending many minutes stuck on one overloaded model.
     """
 
     last_exc = None
@@ -583,7 +599,7 @@ def retry_with_backoff(
 
 
 # ==================================================================
-# GEMINI SCRIPT GENERATION
+# GEMINI PROMPT
 # ==================================================================
 
 SCRIPT_SYSTEM_PROMPT = """You are writing a 30-45 second YouTube Shorts script
@@ -678,9 +694,11 @@ Topic: {topic}
 """
 
 
-def is_model_unavailable_error(
-    e
-) -> bool:
+# ==================================================================
+# GEMINI ERROR DETECTION
+# ==================================================================
+
+def is_model_unavailable_error(e) -> bool:
 
     msg = str(e).lower()
 
@@ -690,6 +708,9 @@ def is_model_unavailable_error(
         "unsupported",
         "model not found",
         "unknown model",
+        "model is not available",
+        "not available for your project",
+        "does not exist",
     ]
 
     return any(
@@ -698,9 +719,7 @@ def is_model_unavailable_error(
     )
 
 
-def is_gemini_retryable_error(
-    e
-) -> bool:
+def is_gemini_retryable_error(e) -> bool:
 
     msg = str(e).lower()
 
@@ -709,42 +728,183 @@ def is_gemini_retryable_error(
         "resource_exhausted",
         "quota",
         "rate limit",
+        "too many requests",
+
+        "500",
+        "internal server error",
+        "internal",
+
+        "502",
+        "bad gateway",
+
         "503",
         "service unavailable",
         "high demand",
         "temporarily unavailable",
-        "internal server error",
-        "500",
+        "overloaded",
+
+        "504",
         "deadline exceeded",
         "timeout",
+        "timed out",
+        "connection reset",
+        "connection error",
     ]
 
-    if any(
+    return any(
         marker in msg
         for marker in transient_markers
-    ):
+    )
 
-        if (
-            "429" in msg
-            or "resource_exhausted" in msg
-            or "quota" in msg
-            or "rate limit" in msg
-        ):
 
-            print(
-                "      Gemini quota/rate limit detected."
+# ==================================================================
+# GEMINI MODEL DISCOVERY
+# ==================================================================
+
+def get_available_gemini_models(client) -> list:
+    """
+    Discover models available to the current API key.
+
+    Only models supporting generateContent are considered.
+
+    The configured preferred order is preserved.
+    Additional Flash models exposed by the API are appended.
+    """
+
+    print(
+        "      Discovering available Gemini models..."
+    )
+
+    try:
+
+        available = []
+
+        for model_info in client.models.list():
+
+            supported_actions = getattr(
+                model_info,
+                "supported_actions",
+                []
+            ) or []
+
+            if (
+                "generateContent"
+                not in supported_actions
+            ):
+                continue
+
+            model_name = getattr(
+                model_info,
+                "name",
+                ""
             )
 
-        return True
+            if not model_name:
+                continue
 
-    return False
+            # API may return:
+            #
+            # models/gemini-3.8-flash
+            #
+            # We only need:
+            #
+            # gemini-3.8-flash
+            model_id = model_name.split(
+                "/"
+            )[-1]
 
+            available.append(
+                model_id
+            )
+
+        if not available:
+
+            print(
+                "      Model discovery returned no "
+                "generateContent models."
+            )
+
+            print(
+                "      Using configured model list."
+            )
+
+            return GEMINI_MODELS.copy()
+
+        # ----------------------------------------------------------
+        # Preferred models first
+        # ----------------------------------------------------------
+
+        preferred = [
+            model
+            for model in GEMINI_MODELS
+            if model in available
+        ]
+
+        # ----------------------------------------------------------
+        # Add other Flash models discovered by the API.
+        # ----------------------------------------------------------
+
+        additional = [
+            model
+            for model in available
+            if (
+                "flash" in model.lower()
+                and model not in preferred
+            )
+        ]
+
+        models = (
+            preferred
+            + additional
+        )
+
+        print(
+            "      Available Flash models:"
+        )
+
+        for model in models:
+
+            print(
+                f"        - {model}"
+            )
+
+        if not models:
+
+            print(
+                "      No configured Flash model was "
+                "found in discovery results."
+            )
+
+            return GEMINI_MODELS.copy()
+
+        return models
+
+    except Exception as e:
+
+        print(
+            f"      Model discovery failed: {e}"
+        )
+
+        print(
+            "      Falling back to configured model list."
+        )
+
+        return GEMINI_MODELS.copy()
+
+
+# ==================================================================
+# GEMINI SCRIPT GENERATION
+# ==================================================================
 
 def generate_script(
     topic: str,
     ending_style: str,
     recent_titles: list = None,
 ) -> dict:
+
+    # --------------------------------------------------------------
+    # RECENT TITLE CONTEXT
+    # --------------------------------------------------------------
 
     if recent_titles:
 
@@ -768,11 +928,19 @@ def generate_script(
 
         recent_titles_block = ""
 
+    # --------------------------------------------------------------
+    # BUILD PROMPT
+    # --------------------------------------------------------------
+
     prompt = SCRIPT_SYSTEM_PROMPT.format(
         topic=topic,
         ending_style=ending_style,
         recent_titles_block=recent_titles_block,
     )
+
+    # --------------------------------------------------------------
+    # GEMINI CLIENT
+    # --------------------------------------------------------------
 
     from google import genai
 
@@ -780,12 +948,32 @@ def generate_script(
         api_key=GEMINI_API_KEY
     )
 
+    # --------------------------------------------------------------
+    # DISCOVER MODELS
+    # --------------------------------------------------------------
+
+    models_to_try = get_available_gemini_models(
+        client
+    )
+
+    if not models_to_try:
+
+        raise RuntimeError(
+            "No Gemini models supporting "
+            "generateContent were found."
+        )
+
     last_error = None
 
-    for model in GEMINI_MODELS:
+    # --------------------------------------------------------------
+    # TRY EVERY AVAILABLE MODEL
+    # --------------------------------------------------------------
+
+    for model in models_to_try:
 
         print(
-            f"      Trying Gemini model: {model}"
+            "\n      "
+            f"Trying Gemini model: {model}"
         )
 
         def _call_gemini():
@@ -800,18 +988,33 @@ def generate_script(
 
         try:
 
+            # ------------------------------------------------------
+            # Two attempts per model.
+            #
+            # This keeps the workflow fast while still allowing
+            # temporary 503/429 errors a chance to recover.
+            # ------------------------------------------------------
+
             response = retry_with_backoff(
                 _call_gemini,
-                retries=4,
-                base_delay=20,
+                retries=2,
+                base_delay=8,
                 should_retry=is_gemini_retryable_error,
             )
+
+            # ------------------------------------------------------
+            # EMPTY RESPONSE
+            # ------------------------------------------------------
 
             if not response.text:
 
                 raise RuntimeError(
                     "Gemini returned an empty response."
                 )
+
+            # ------------------------------------------------------
+            # PARSE JSON
+            # ------------------------------------------------------
 
             try:
 
@@ -822,7 +1025,7 @@ def generate_script(
             except json.JSONDecodeError as e:
 
                 print(
-                    "Gemini returned invalid JSON:"
+                    "      Gemini returned invalid JSON:"
                 )
 
                 print(
@@ -833,16 +1036,65 @@ def generate_script(
                     "Gemini response was not valid JSON."
                 ) from e
 
+            # ------------------------------------------------------
+            # VALIDATE TITLE
+            # ------------------------------------------------------
+
             if "title" not in data:
 
                 raise RuntimeError(
                     "Gemini response has no title."
                 )
 
+            if not isinstance(
+                data["title"],
+                str,
+            ):
+
+                raise RuntimeError(
+                    "Gemini title is not a string."
+                )
+
+            data["title"] = data[
+                "title"
+            ].strip()
+
+            if not data["title"]:
+
+                raise RuntimeError(
+                    "Gemini returned an empty title."
+                )
+
+            if len(
+                data["title"]
+            ) > 100:
+
+                print(
+                    "      Warning: title exceeds "
+                    "100 characters. Trimming."
+                )
+
+                data["title"] = data[
+                    "title"
+                ][:100].rstrip()
+
+            # ------------------------------------------------------
+            # VALIDATE SCENES
+            # ------------------------------------------------------
+
             if "scenes" not in data:
 
                 raise RuntimeError(
                     "Gemini response has no scenes."
+                )
+
+            if not isinstance(
+                data["scenes"],
+                list,
+            ):
+
+                raise RuntimeError(
+                    "Gemini scenes is not a list."
                 )
 
             if not data["scenes"]:
@@ -853,10 +1105,42 @@ def generate_script(
 
             for scene in data["scenes"]:
 
+                if not isinstance(
+                    scene,
+                    dict,
+                ):
+
+                    raise RuntimeError(
+                        "Gemini returned an invalid scene."
+                    )
+
                 if "narration" not in scene:
 
                     raise RuntimeError(
                         "Scene is missing narration."
+                    )
+
+                if not isinstance(
+                    scene["narration"],
+                    str,
+                ):
+
+                    raise RuntimeError(
+                        "Scene narration is not a string."
+                    )
+
+                scene[
+                    "narration"
+                ] = scene[
+                    "narration"
+                ].strip()
+
+                if not scene[
+                    "narration"
+                ]:
+
+                    raise RuntimeError(
+                        "Scene has empty narration."
                     )
 
                 if "visual_type" not in scene:
@@ -871,7 +1155,9 @@ def generate_script(
                         "Scene is missing visual_query."
                     )
 
-                if scene["visual_type"] not in (
+                if scene[
+                    "visual_type"
+                ] not in (
                     "literal",
                     "abstract",
                 ):
@@ -879,12 +1165,63 @@ def generate_script(
                     raise RuntimeError(
                         "Invalid visual_type: "
                         + str(
-                            scene["visual_type"]
+                            scene[
+                                "visual_type"
+                            ]
                         )
                     )
 
+                scene[
+                    "visual_query"
+                ] = str(
+                    scene[
+                        "visual_query"
+                    ]
+                ).strip()
+
+                if not scene[
+                    "visual_query"
+                ]:
+
+                    raise RuntimeError(
+                        "Scene has empty visual_query."
+                    )
+
+            # ------------------------------------------------------
+            # VALIDATE HASHTAGS
+            # ------------------------------------------------------
+
+            if "hashtags" not in data:
+
+                data["hashtags"] = [
+                    "#shorts",
+                    "#space",
+                    "#facts",
+                ]
+
+            if not isinstance(
+                data["hashtags"],
+                list,
+            ):
+
+                data["hashtags"] = [
+                    "#shorts",
+                    "#space",
+                    "#facts",
+                ]
+
+            # ------------------------------------------------------
+            # SUCCESS
+            # ------------------------------------------------------
+
             print(
-                f"      Gemini succeeded with {model}"
+                "\n      "
+                f"Gemini succeeded with: {model}"
+            )
+
+            print(
+                f"      Generated "
+                f"{len(data['scenes'])} scenes."
             )
 
             return data
@@ -894,8 +1231,16 @@ def generate_script(
             last_error = e
 
             print(
-                f"      Gemini model {model} failed: {e}"
+                f"      Model {model} failed:"
             )
+
+            print(
+                f"      {e}"
+            )
+
+            # ------------------------------------------------------
+            # UNAVAILABLE MODEL
+            # ------------------------------------------------------
 
             if is_model_unavailable_error(
                 e
@@ -906,30 +1251,52 @@ def generate_script(
                 )
 
                 print(
-                    "      Trying the next Gemini model..."
+                    "      Moving to next model..."
                 )
 
                 continue
+
+            # ------------------------------------------------------
+            # TEMPORARY ERROR
+            # ------------------------------------------------------
 
             if is_gemini_retryable_error(
                 e
             ):
 
                 print(
-                    f"      Model {model} remains unavailable "
-                    "after retries."
+                    f"      Model {model} remains "
+                    "unavailable after retries."
                 )
 
                 print(
-                    "      Trying the next Gemini model..."
+                    "      Moving to next model..."
                 )
 
                 continue
 
-            raise
+            # ------------------------------------------------------
+            # BAD RESPONSE
+            #
+            # Try another model rather than killing the entire run.
+            # ------------------------------------------------------
+
+            print(
+                "      Response was unusable."
+            )
+
+            print(
+                "      Moving to next model..."
+            )
+
+            continue
+
+    # --------------------------------------------------------------
+    # EVERYTHING FAILED
+    # --------------------------------------------------------------
 
     raise RuntimeError(
-        "All configured Gemini models failed. "
+        "All available Gemini models failed. "
         f"Last error: {last_error}"
     )
 
@@ -1285,7 +1652,9 @@ def fetch_visual_for_scene(
     run_dir: Path,
 ) -> dict:
 
-    if scene["visual_type"] == "literal":
+    if scene[
+        "visual_type"
+    ] == "literal":
 
         out_path = (
             run_dir
@@ -1464,7 +1833,9 @@ def build_video(
         # VIDEO VISUAL
         # ----------------------------------------------------------
 
-        if visual["type"] == "video":
+        if visual[
+            "type"
+        ] == "video":
 
             clip = VideoFileClip(
                 str(
@@ -1703,7 +2074,7 @@ def run_pipeline():
         raise
 
     # --------------------------------------------------------------
-    # Mark topic used only after Gemini succeeds.
+    # Mark topic used ONLY after Gemini succeeds.
     # --------------------------------------------------------------
 
     commit_topic_progress(
