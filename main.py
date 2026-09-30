@@ -1,34 +1,28 @@
 """
-SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v4)
+SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v5)
 
-GitHub Actions / local Python pipeline.
+Pipeline:
+1. Fetch fresh "On This Day" historical events and/or trivia
+2. Select a strong topic with Gemini
+3. Generate a 30–45 second Shorts script
+4. Generate short caption chunks designed for Shorts
+5. Generate narration with Edge TTS
+6. Fetch visuals from Pexels / Pollinations
+7. Assemble a 1080x1920 Short
+8. Upload to YouTube as public
 
-One run:
-1. Pick a topic
-2. Discover available Gemini models
-3. Generate a script with Gemini
-4. Generate narration with Edge TTS
-5. Source visuals from Pexels / Pollinations
-6. Assemble the Short with MoviePy
-7. Upload to YouTube as public
+No fixed topic pool is required for the daily history/trivia engine.
 
-IMPORTANT:
-- Uses the modern google-genai SDK.
-- Gemini models are discovered automatically when possible.
-- Multiple Gemini Flash models are tried automatically.
-- Temporary Gemini errors use short exponential backoff.
-- A topic is only marked as used AFTER Gemini successfully
-  generates a valid script.
-- The JSON prompt uses escaped braces so .format() cannot
-  accidentally interpret the JSON as Python format fields.
-
-CHANGELOG (this version)
-- Added a third topic lane: "building" — simple/clever
-  construction and engineering tricks throughout history.
-  Split out of "history" because "The Simple Sand Trick Used to
-  Build the Pyramids" (a history-lane video) was the channel's
-  top performer with casual viewers, so this lane gets its own
-  weight instead of competing inside the general history pool.
+Existing infrastructure preserved:
+- Gemini model discovery + fallback
+- Pexels
+- Pollinations
+- Edge TTS
+- MoviePy
+- YouTube upload
+- state_spacefacts.json
+- upload_log.jsonl
+- Anton-Regular.ttf
 """
 
 import os
@@ -36,10 +30,13 @@ import json
 import random
 import asyncio
 import time
-import requests
-
+import html
+import re
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
+import requests
 import youtube_upload
 
 
@@ -50,13 +47,6 @@ import youtube_upload
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
 
-# Preferred Gemini model order.
-#
-# The pipeline first asks the API which models are available.
-# It then uses this order for the models that are actually exposed
-# to the API key.
-#
-# If a model is unavailable, it is skipped automatically.
 GEMINI_MODELS = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
@@ -85,22 +75,24 @@ BGM_DIR = Path(__file__).parent / "bgm"
 
 
 # ==================================================================
-# CATEGORY WEIGHTS
+# CONTENT MIX
 # ==================================================================
 
-# "building" gets a meaningful share out of the gate since it's
-# essentially a spin-off of the channel's actual top casual-viewer
-# performer (the pyramids sand-trick video). Adjust these by hand
-# once a few weeks of real per-category data comes in.
-CATEGORY_WEIGHTS = {
-    "space": 0.35,
-    "history": 0.30,
-    "building": 0.35,
+# Fresh historical events are the main content source.
+#
+# The values don't have to total exactly 1.0, but they do here
+# for clarity.
+
+CONTENT_WEIGHTS = {
+    "on_this_day": 0.50,
+    "trivia": 0.25,
+    "history": 0.15,
+    "building": 0.10,
 }
 
 
 # ==================================================================
-# EDGE TTS VOICES
+# EDGE TTS
 # ==================================================================
 
 TTS_VOICES = [
@@ -112,245 +104,42 @@ TTS_VOICES = [
 
 
 # ==================================================================
-# TOPICS
+# GENERAL FALLBACK TOPICS
 # ==================================================================
 
-TOPIC_POOL = [
-
-    # --------------------------------------------------------------
-    # SPACE
-    # --------------------------------------------------------------
-
+FALLBACK_TOPICS = [
     {
-        "topic": "gravitational time dilation near a black hole",
-        "category": "space",
+        "topic": "why the pyramids still stand after thousands of years",
+        "category": "building",
     },
     {
-        "topic": "what a neutron star's density actually means",
-        "category": "space",
+        "topic": "how ancient Roman concrete could repair itself",
+        "category": "building",
     },
     {
-        "topic": "why the observable universe has an edge",
-        "category": "space",
-    },
-    {
-        "topic": "spaghettification near a black hole's event horizon",
-        "category": "space",
-    },
-    {
-        "topic": "how fast the Milky Way is actually moving",
-        "category": "space",
-    },
-    {
-        "topic": "what would happen if you fell into a wormhole",
-        "category": "space",
-    },
-    {
-        "topic": "why space is completely silent",
-        "category": "space",
-    },
-    {
-        "topic": "how close we've actually gotten to absolute zero",
-        "category": "space",
-    },
-    {
-        "topic": "the size of the largest known star compared to the sun",
-        "category": "space",
-    },
-    {
-        "topic": "why time moves slower for astronauts on the ISS",
-        "category": "space",
-    },
-    {
-        "topic": "what dark matter actually does to galaxies",
-        "category": "space",
-    },
-    {
-        "topic": "how a supernova could theoretically threaten Earth",
-        "category": "space",
-    },
-    {
-        "topic": "why Jupiter's Great Red Spot has lasted for centuries",
-        "category": "space",
-    },
-    {
-        "topic": "what a rogue planet drifting with no star actually looks like",
-        "category": "space",
-    },
-    {
-        "topic": "how astronauts' bodies actually change after months in orbit",
-        "category": "space",
-    },
-    {
-        "topic": "why Venus spins backward compared to almost every other planet",
-        "category": "space",
-    },
-    {
-        "topic": "what would really happen if the sun vanished for one second",
-        "category": "space",
-    },
-    {
-        "topic": "how close the nearest black hole actually is to Earth",
-        "category": "space",
-    },
-    {
-        "topic": "how big the largest known structure in the entire universe actually is",
-        "category": "space",
-    },
-    {
-        "topic": "how much of the periodic table can only be made inside a dying star",
-        "category": "space",
-    },
-
-    # --------------------------------------------------------------
-    # HISTORY
-    # --------------------------------------------------------------
-
-    {
-        "topic": "how the Antikythera mechanism baffled experts for a century",
+        "topic": "why the Antikythera mechanism was so advanced",
         "category": "history",
     },
     {
-        "topic": "what really happened to the Library of Alexandria",
+        "topic": "why the Voynich manuscript remains undecoded",
         "category": "history",
     },
     {
-        "topic": "why the Voynich manuscript still hasn't been decoded",
-        "category": "history",
+        "topic": "why space is silent",
+        "category": "space",
     },
     {
-        "topic": "how an entire Roman legion vanished without a trace",
-        "category": "history",
-    },
-    {
-        "topic": "what the Baghdad Battery might have actually been used for",
-        "category": "history",
-    },
-    {
-        "topic": "what the Dancing Plague of 1518 actually did to people",
-        "category": "history",
-    },
-    {
-        "topic": "how the Bronze Age Collapse wiped out multiple civilizations at once",
-        "category": "history",
-    },
-    {
-        "topic": "what really caused the Tunguska explosion",
-        "category": "history",
-    },
-    {
-        "topic": "what happened to the lost colony of Roanoke",
-        "category": "history",
-    },
-    {
-        "topic": "why the Sutton Hoo ship burial rewrote what historians knew about early England",
-        "category": "history",
-    },
-    {
-        "topic": "what the Rosetta Stone actually took decades to fully decode",
-        "category": "history",
-    },
-    {
-        "topic": "how Greek fire's exact recipe was lost to history forever",
-        "category": "history",
-    },
-    {
-        "topic": "what really caused the sudden collapse of the Maya civilization",
-        "category": "history",
-    },
-    {
-        "topic": "why the Phaistos Disc's symbols still can't be translated",
-        "category": "history",
-    },
-
-    # --------------------------------------------------------------
-    # BUILDING — simple/clever construction and engineering tricks
-    # throughout history. Split out of "history" specifically
-    # because the pyramids-sand-trick video outperformed everything
-    # else with casual viewers.
-    # --------------------------------------------------------------
-
-    {
-        "topic": "the simple sand trick used to build the pyramids at Giza",
-        "category": "building",
-    },
-    {
-        "topic": "how ancient builders moved multi-ton stones with no modern machines",
-        "category": "building",
-    },
-    {
-        "topic": "the water-leveling trick Egyptian architects used before modern tools existed",
-        "category": "building",
-    },
-    {
-        "topic": "how Roman aqueducts moved water across entire regions using only gravity",
-        "category": "building",
-    },
-    {
-        "topic": "the simple lever trick used to raise ancient obelisks upright",
-        "category": "building",
-    },
-    {
-        "topic": "how ancient underground qanats moved water with zero pumps",
-        "category": "building",
-    },
-    {
-        "topic": "the ramp trick used to carry the Great Wall of China across mountains",
-        "category": "building",
-    },
-    {
-        "topic": "the corbel arch trick ancient builders used before the true arch existed",
-        "category": "building",
-    },
-    {
-        "topic": "how Incan stone walls fit together perfectly with zero mortar",
-        "category": "building",
-    },
-    {
-        "topic": "the drainage trick that's kept Roman roads intact for 2,000 years",
-        "category": "building",
-    },
-    {
-        "topic": "how simple pulley systems let ancient workers lift multi-ton blocks",
-        "category": "building",
-    },
-    {
-        "topic": "the compression trick that lets ancient stone domes hold their own weight forever",
-        "category": "building",
-    },
-    {
-        "topic": "how ancient Persian windcatchers cooled buildings with no electricity",
-        "category": "building",
-    },
-    {
-        "topic": "the flying buttress trick that let medieval cathedrals grow impossibly tall",
-        "category": "building",
-    },
-    {
-        "topic": "how ancient Chinese builders locked wood joints together with zero nails",
-        "category": "building",
-    },
-    {
-        "topic": "the mortar recipe ancient Romans used that outlasts modern concrete",
-        "category": "building",
-    },
-    {
-        "topic": "how ancient timber-frame buildings survive earthquakes better than concrete",
-        "category": "building",
-    },
-    {
-        "topic": "the counterweight trick behind medieval cranes and trebuchets",
-        "category": "building",
+        "topic": "why astronauts age slightly differently in orbit",
+        "category": "space",
     },
 ]
 
 
 # ==================================================================
-# VALIDATION
+# ENVIRONMENT
 # ==================================================================
 
 def validate_environment():
-    """Check required environment variables before starting."""
 
     missing = []
 
@@ -368,164 +157,60 @@ def validate_environment():
 
 
 # ==================================================================
-# STATE HANDLING
+# STATE
 # ==================================================================
 
 def load_state():
+
     if STATE_FILE.exists():
+
         try:
             return json.loads(
                 STATE_FILE.read_text(
                     encoding="utf-8"
                 )
             )
+
         except Exception as e:
+
             print(
                 f"Warning: Could not read state file: {e}"
             )
 
     return {
-        "category_progress": {},
         "recent_titles": [],
+        "used_source_ids": [],
+        "used_topic_keys": [],
+        "last_content_date": "",
     }
 
 
 def save_state(state):
+
     STATE_FILE.write_text(
         json.dumps(
             state,
-            indent=2
+            indent=2,
         ),
         encoding="utf-8",
     )
 
 
-def get_category_topics(category: str) -> list:
-    return [
-        t
-        for t in TOPIC_POOL
-        if t["category"] == category
-    ]
+def get_recent_titles():
 
-
-def get_next_topic():
-    """
-    Select the next topic.
-
-    This function does NOT save progress.
-
-    The topic is only marked as used after Gemini successfully
-    generates a script.
-    """
-
-    state = load_state()
-
-    state.setdefault(
-        "category_progress",
-        {}
-    )
-
-    categories = list(
-        CATEGORY_WEIGHTS.keys()
-    )
-
-    weights = [
-        CATEGORY_WEIGHTS[c]
-        for c in categories
-    ]
-
-    chosen_category = random.choices(
-        categories,
-        weights=weights,
-        k=1,
-    )[0]
-
-    category_topics = get_category_topics(
-        chosen_category
-    )
-
-    if not category_topics:
-        raise RuntimeError(
-            f"No topics found for category: "
-            f"{chosen_category}"
-        )
-
-    progress = state[
-        "category_progress"
-    ].get(
-        chosen_category
-    )
-
-    if (
-        not progress
-        or "order" not in progress
-        or "position" not in progress
-        or progress["position"] >= len(
-            progress["order"]
-        )
-    ):
-
-        order = list(
-            range(
-                len(category_topics)
-            )
-        )
-
-        random.shuffle(order)
-
-        progress = {
-            "order": order,
-            "position": 0,
-        }
-
-    topic_index = progress["order"][
-        progress["position"]
-    ]
-
-    topic_entry = category_topics[
-        topic_index
-    ]
-
-    return (
-        topic_entry,
-        chosen_category,
-        progress,
+    return load_state().get(
+        "recent_titles",
+        [],
     )
 
 
-def commit_topic_progress(
-    category: str,
-    progress: dict,
-):
-    """
-    Mark the selected topic as used.
-
-    Called ONLY after successful script generation.
-    """
-
-    state = load_state()
-
-    state.setdefault(
-        "category_progress",
-        {}
-    )
-
-    progress["position"] += 1
-
-    state[
-        "category_progress"
-    ][category] = progress
-
-    save_state(state)
-
-
-def record_used_title(title: str):
+def record_used_title(title):
 
     state = load_state()
 
     recent = state.get(
         "recent_titles",
-        []
+        [],
     )
 
     recent.append(title)
@@ -535,23 +220,73 @@ def record_used_title(title: str):
     save_state(state)
 
 
-def get_recent_titles() -> list:
+def remember_source(source_id):
 
-    return load_state().get(
-        "recent_titles",
-        []
+    state = load_state()
+
+    used = state.get(
+        "used_source_ids",
+        [],
+    )
+
+    if source_id:
+        used.append(str(source_id))
+
+    state["used_source_ids"] = used[-300:]
+
+    save_state(state)
+
+
+def source_was_used(source_id):
+
+    state = load_state()
+
+    return str(source_id) in [
+        str(x)
+        for x in state.get(
+            "used_source_ids",
+            [],
+        )
+    ]
+
+
+def remember_topic(topic_key):
+
+    state = load_state()
+
+    used = state.get(
+        "used_topic_keys",
+        [],
+    )
+
+    if topic_key:
+        used.append(topic_key)
+
+    state["used_topic_keys"] = used[-300:]
+
+    save_state(state)
+
+
+def topic_was_used(topic_key):
+
+    state = load_state()
+
+    return topic_key in state.get(
+        "used_topic_keys",
+        [],
     )
 
 
+# ==================================================================
+# UPLOAD LOG
+# ==================================================================
+
 def log_upload(
-    video_id: str,
-    title: str,
-    category: str,
-    ending_style: str,
+    video_id,
+    title,
+    category,
+    ending_style,
 ):
-    """
-    Append successful YouTube uploads to upload_log.jsonl.
-    """
 
     entry = {
         "video_id": video_id,
@@ -574,7 +309,7 @@ def log_upload(
 
 
 # ==================================================================
-# GENERIC RETRY HELPER
+# RETRY
 # ==================================================================
 
 def retry_with_backoff(
@@ -585,25 +320,10 @@ def retry_with_backoff(
     should_retry=None,
     **kwargs,
 ):
-    """
-    Retry a function using exponential backoff.
-
-    Default Gemini behavior:
-        attempt 1
-        wait ~8s
-        attempt 2
-        wait ~16s
-        attempt 3
-
-    The shorter retry window prevents GitHub Actions from
-    spending many minutes stuck on one overloaded model.
-    """
 
     last_exc = None
 
-    for attempt in range(
-        retries
-    ):
+    for attempt in range(retries):
 
         try:
 
@@ -619,21 +339,11 @@ def retry_with_backoff(
             if should_retry is not None:
 
                 try:
-
-                    retryable = should_retry(
-                        e
-                    )
-
+                    retryable = should_retry(e)
                 except Exception:
-
                     retryable = False
 
                 if not retryable:
-
-                    print(
-                        f"      Not retrying error: {e}"
-                    )
-
                     raise
 
             if attempt >= retries - 1:
@@ -641,14 +351,12 @@ def retry_with_backoff(
 
             delay = (
                 base_delay
-                * (
-                    2 ** attempt
-                )
+                * (2 ** attempt)
             )
 
             delay += random.uniform(
                 0,
-                3
+                3,
             )
 
             print(
@@ -656,123 +364,23 @@ def retry_with_backoff(
             )
 
             print(
-                f"      Retrying in "
-                f"{delay:.1f}s..."
+                f"      Retrying in {delay:.1f}s..."
             )
 
-            time.sleep(
-                delay
-            )
+            time.sleep(delay)
 
     raise last_exc
-
-
-# ==================================================================
-# GEMINI PROMPT
-# ==================================================================
-
-SCRIPT_SYSTEM_PROMPT = """You are writing a 30-45 second YouTube Shorts script
-about one of: a space/physics fact, a strange piece of real history, or a
-simple/clever construction or engineering trick from history.
-
-ENDING STYLE FOR THIS SCRIPT: {ending_style}
-
-Rules for how it should sound:
-
-- Write like you're explaining something wild to a friend, not narrating
-  a documentary.
-- Use contractions (it's, you'd, that's, don't).
-- Vary sentence length: mix short punchy lines with one longer
-  explanatory line.
-- Do NOT use rhetorical filler like "this isn't science fiction, it's
-  reality" or "prepare to have your mind blown."
-- Do NOT stack intensifiers (incredibly, absolutely, insanely). Pick
-  ONE strong word max per sentence, and only when it's earned.
-- Include exactly one moment of genuine surprise or disbelief, phrased
-  like a reaction, not a lecture.
-- Deliver the core fact clearly before the final scene.
-
-HOOK (the very first scene's narration) — use ONE of these patterns,
-whichever fits the topic best. The hook must work in 2-3 seconds:
-
-1. Compare the extreme to something ordinary the viewer already has
-   a mental reference for.
-2. Lead with a specific number or stat before any setup.
-3. Direct address framed as a personal stake.
-4. False premise, immediate correction.
-5. Blunt, ominous fact fragment, no lead-in at all.
-
-Prefer pattern 1 when a genuinely apt comparison exists.
-
-Do NOT use generic hook filler like "did you know" or
-"here's a fact that will blow your mind."
-
-ENDING:
-
-- If ending_style is "loop": the FINAL scene must end mid-thought or
-  lead seamlessly into the very first word of the hook, so the video
-  loops endlessly with no visible seam.
-- If ending_style is "joke": the FINAL scene must be a short joke or
-  pun directly related to the fact. One line, genuinely funny, not a
-  generic dad joke.
-
-TITLE:
-
-- Use curiosity-gap framing.
-- Under 60 characters.
-- No misleading clickbait.
-- Avoid "terrifying", "insane", "shocking" in the title.
-
-SCENES:
-
-Break the script into scenes.
-
-Each scene is one or two sentences of narration.
-
-For each scene provide a visual.
-
-visual_type:
-
-- "literal" if real stock footage exists.
-- "abstract" if it is a concept with no suitable real footage.
-
-visual_query:
-
-- For "literal": 3-6 word stock footage search term.
-- For "abstract": descriptive AI image generation prompt.
-
-Return ONLY valid JSON.
-
-Exact shape:
-
-{{
-"title": "short punchy YouTube title, under 60 characters",
-"hook": "the first scene's narration",
-"scenes": [
-{{
-"narration": "...",
-"visual_type": "literal",
-"visual_query": "..."
-}}
-],
-"hashtags": ["#shorts", "#space", "#facts"]
-}}
-
-Topic: {topic}
-
-{recent_titles_block}
-"""
 
 
 # ==================================================================
 # GEMINI ERROR DETECTION
 # ==================================================================
 
-def is_model_unavailable_error(e) -> bool:
+def is_model_unavailable_error(e):
 
     msg = str(e).lower()
 
-    unavailable_markers = [
+    markers = [
         "404",
         "not found",
         "unsupported",
@@ -785,15 +393,15 @@ def is_model_unavailable_error(e) -> bool:
 
     return any(
         marker in msg
-        for marker in unavailable_markers
+        for marker in markers
     )
 
 
-def is_gemini_retryable_error(e) -> bool:
+def is_gemini_retryable_error(e):
 
     msg = str(e).lower()
 
-    transient_markers = [
+    markers = [
         "429",
         "resource_exhausted",
         "quota",
@@ -802,7 +410,6 @@ def is_gemini_retryable_error(e) -> bool:
 
         "500",
         "internal server error",
-        "internal",
 
         "502",
         "bad gateway",
@@ -823,23 +430,246 @@ def is_gemini_retryable_error(e) -> bool:
 
     return any(
         marker in msg
-        for marker in transient_markers
+        for marker in markers
     )
+
+
+# ==================================================================
+# WIKIMEDIA — ON THIS DAY
+# ==================================================================
+
+def fetch_on_this_day():
+
+    today = datetime.now(
+        timezone.utc
+    )
+
+    month = today.month
+    day = today.day
+
+    url = (
+        "https://api.wikimedia.org/feed/v1/"
+        f"wikipedia/en/onthisday/all/"
+        f"{month:02d}/{day:02d}"
+    )
+
+    print(
+        f"      Fetching Wikimedia events for "
+        f"{month:02d}/{day:02d}..."
+    )
+
+    try:
+
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent":
+                    "SpaceFactsPipeline/5.0"
+            },
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        events = data.get(
+            "events",
+            [],
+        )
+
+        candidates = []
+
+        for event in events:
+
+            year = event.get(
+                "year"
+            )
+
+            text = event.get(
+                "text",
+                "",
+            ).strip()
+
+            pages = event.get(
+                "pages",
+                [],
+            )
+
+            if not text:
+                continue
+
+            page_titles = []
+
+            for page in pages[:3]:
+
+                title = page.get(
+                    "title",
+                    "",
+                )
+
+                if title:
+                    page_titles.append(
+                        title
+                    )
+
+            source_id = (
+                f"wikimedia-{month:02d}-"
+                f"{day:02d}-{year}-"
+                f"{hash(text)}"
+            )
+
+            if source_was_used(
+                source_id
+            ):
+                continue
+
+            candidates.append(
+                {
+                    "source": "Wikimedia",
+                    "source_id": source_id,
+                    "date": f"{month:02d}/{day:02d}",
+                    "year": year,
+                    "text": text,
+                    "pages": page_titles,
+                    "category": "on_this_day",
+                }
+            )
+
+        # Remove extremely long/weak entries.
+        candidates = [
+            x
+            for x in candidates
+            if 20 <= len(
+                x["text"]
+            ) <= 500
+        ]
+
+        random.shuffle(
+            candidates
+        )
+
+        candidates = candidates[:25]
+
+        print(
+            f"      Found {len(candidates)} "
+            "usable historical events."
+        )
+
+        return candidates
+
+    except Exception as e:
+
+        print(
+            f"      Wikimedia request failed: {e}"
+        )
+
+        return []
+
+
+# ==================================================================
+# OPEN TRIVIA DATABASE
+# ==================================================================
+
+def clean_trivia_text(text):
+
+    return html.unescape(
+        re.sub(
+            r"<[^>]+>",
+            "",
+            text,
+        )
+    ).strip()
+
+
+def fetch_trivia():
+
+    url = (
+        "https://opentdb.com/api.php"
+    )
+
+    params = {
+        "amount": 20,
+        "type": "multiple",
+    }
+
+    print(
+        "      Fetching general trivia..."
+    )
+
+    try:
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        results = data.get(
+            "results",
+            [],
+        )
+
+        candidates = []
+
+        for index, item in enumerate(
+            results
+        ):
+
+            question = clean_trivia_text(
+                item.get(
+                    "question",
+                    "",
+                )
+            )
+
+            answer = clean_trivia_text(
+                item.get(
+                    "correct_answer",
+                    "",
+                )
+            )
+
+            if not question or not answer:
+                continue
+
+            candidates.append(
+                {
+                    "source": "OpenTDB",
+                    "source_id": (
+                        f"trivia-{hash(question)}"
+                    ),
+                    "question": question,
+                    "answer": answer,
+                    "category": "trivia",
+                }
+            )
+
+        print(
+            f"      Found {len(candidates)} "
+            "trivia questions."
+        )
+
+        return candidates
+
+    except Exception as e:
+
+        print(
+            f"      Trivia request failed: {e}"
+        )
+
+        return []
 
 
 # ==================================================================
 # GEMINI MODEL DISCOVERY
 # ==================================================================
 
-def get_available_gemini_models(client) -> list:
-    """
-    Discover models available to the current API key.
-
-    Only models supporting generateContent are considered.
-
-    The configured preferred order is preserved.
-    Additional Flash models exposed by the API are appended.
-    """
+def get_available_gemini_models(client):
 
     print(
         "      Discovering available Gemini models..."
@@ -854,7 +684,7 @@ def get_available_gemini_models(client) -> list:
             supported_actions = getattr(
                 model_info,
                 "supported_actions",
-                []
+                [],
             ) or []
 
             if (
@@ -866,19 +696,12 @@ def get_available_gemini_models(client) -> list:
             model_name = getattr(
                 model_info,
                 "name",
-                ""
+                "",
             )
 
             if not model_name:
                 continue
 
-            # API may return:
-            #
-            # models/gemini-3.8-flash
-            #
-            # We only need:
-            #
-            # gemini-3.8-flash
             model_id = model_name.split(
                 "/"
             )[-1]
@@ -890,29 +713,16 @@ def get_available_gemini_models(client) -> list:
         if not available:
 
             print(
-                "      Model discovery returned no "
-                "generateContent models."
-            )
-
-            print(
-                "      Using configured model list."
+                "      Discovery returned no models."
             )
 
             return GEMINI_MODELS.copy()
-
-        # ----------------------------------------------------------
-        # Preferred models first
-        # ----------------------------------------------------------
 
         preferred = [
             model
             for model in GEMINI_MODELS
             if model in available
         ]
-
-        # ----------------------------------------------------------
-        # Add other Flash models discovered by the API.
-        # ----------------------------------------------------------
 
         additional = [
             model
@@ -933,21 +743,15 @@ def get_available_gemini_models(client) -> list:
         )
 
         for model in models:
-
             print(
                 f"        - {model}"
             )
 
-        if not models:
-
-            print(
-                "      No configured Flash model was "
-                "found in discovery results."
-            )
-
-            return GEMINI_MODELS.copy()
-
-        return models
+        return (
+            models
+            if models
+            else GEMINI_MODELS.copy()
+        )
 
     except Exception as e:
 
@@ -956,61 +760,21 @@ def get_available_gemini_models(client) -> list:
         )
 
         print(
-            "      Falling back to configured model list."
+            "      Using configured fallback list."
         )
 
         return GEMINI_MODELS.copy()
 
 
 # ==================================================================
-# GEMINI SCRIPT GENERATION
+# GEMINI GENERIC CALL
 # ==================================================================
 
-def generate_script(
-    topic: str,
-    ending_style: str,
-    recent_titles: list = None,
-) -> dict:
-
-    # --------------------------------------------------------------
-    # RECENT TITLE CONTEXT
-    # --------------------------------------------------------------
-
-    if recent_titles:
-
-        titles_list = "\n".join(
-            f"- {t}"
-            for t in recent_titles
-        )
-
-        recent_titles_block = (
-            "AVOID RESEMBLING RECENT VIDEOS — "
-            "these titles were made recently "
-            "on this channel. Even if today's "
-            "topic is technically different, "
-            "do not produce a hook, angle, or "
-            "framing that would feel like a "
-            "repeat to a viewer:\n"
-            + titles_list
-        )
-
-    else:
-
-        recent_titles_block = ""
-
-    # --------------------------------------------------------------
-    # BUILD PROMPT
-    # --------------------------------------------------------------
-
-    prompt = SCRIPT_SYSTEM_PROMPT.format(
-        topic=topic,
-        ending_style=ending_style,
-        recent_titles_block=recent_titles_block,
-    )
-
-    # --------------------------------------------------------------
-    # GEMINI CLIENT
-    # --------------------------------------------------------------
+def call_gemini_json(
+    prompt,
+    *,
+    temperature=None,
+):
 
     from google import genai
 
@@ -1018,352 +782,90 @@ def generate_script(
         api_key=GEMINI_API_KEY
     )
 
-    # --------------------------------------------------------------
-    # DISCOVER MODELS
-    # --------------------------------------------------------------
-
-    models_to_try = get_available_gemini_models(
+    models = get_available_gemini_models(
         client
     )
 
-    if not models_to_try:
-
-        raise RuntimeError(
-            "No Gemini models supporting "
-            "generateContent were found."
-        )
-
     last_error = None
 
-    # --------------------------------------------------------------
-    # TRY EVERY AVAILABLE MODEL
-    # --------------------------------------------------------------
-
-    for model in models_to_try:
+    for model in models:
 
         print(
-            "\n      "
-            f"Trying Gemini model: {model}"
+            f"\n      Trying Gemini model: {model}"
         )
 
-        def _call_gemini():
+        def _call():
+
+            config = {
+                "response_mime_type":
+                    "application/json",
+            }
+
+            if temperature is not None:
+                config["temperature"] = temperature
 
             return client.models.generate_content(
                 model=model,
                 contents=prompt,
-                config={
-                    "response_mime_type": "application/json",
-                },
+                config=config,
             )
 
         try:
 
-            # ------------------------------------------------------
-            # Two attempts per model.
-            #
-            # This keeps the workflow fast while still allowing
-            # temporary 503/429 errors a chance to recover.
-            # ------------------------------------------------------
-
             response = retry_with_backoff(
-                _call_gemini,
+                _call,
                 retries=2,
                 base_delay=8,
                 should_retry=is_gemini_retryable_error,
             )
 
-            # ------------------------------------------------------
-            # EMPTY RESPONSE
-            # ------------------------------------------------------
-
             if not response.text:
-
                 raise RuntimeError(
                     "Gemini returned an empty response."
                 )
 
-            # ------------------------------------------------------
-            # PARSE JSON
-            # ------------------------------------------------------
-
             try:
 
-                data = json.loads(
+                return json.loads(
                     response.text
                 )
 
             except json.JSONDecodeError as e:
 
                 print(
-                    "      Gemini returned invalid JSON:"
+                    "      Invalid JSON from Gemini:"
                 )
 
                 print(
-                    response.text
+                    response.text[:3000]
                 )
 
                 raise RuntimeError(
-                    "Gemini response was not valid JSON."
+                    "Gemini returned invalid JSON."
                 ) from e
-
-            # ------------------------------------------------------
-            # VALIDATE TITLE
-            # ------------------------------------------------------
-
-            if "title" not in data:
-
-                raise RuntimeError(
-                    "Gemini response has no title."
-                )
-
-            if not isinstance(
-                data["title"],
-                str,
-            ):
-
-                raise RuntimeError(
-                    "Gemini title is not a string."
-                )
-
-            data["title"] = data[
-                "title"
-            ].strip()
-
-            if not data["title"]:
-
-                raise RuntimeError(
-                    "Gemini returned an empty title."
-                )
-
-            if len(
-                data["title"]
-            ) > 100:
-
-                print(
-                    "      Warning: title exceeds "
-                    "100 characters. Trimming."
-                )
-
-                data["title"] = data[
-                    "title"
-                ][:100].rstrip()
-
-            # ------------------------------------------------------
-            # VALIDATE SCENES
-            # ------------------------------------------------------
-
-            if "scenes" not in data:
-
-                raise RuntimeError(
-                    "Gemini response has no scenes."
-                )
-
-            if not isinstance(
-                data["scenes"],
-                list,
-            ):
-
-                raise RuntimeError(
-                    "Gemini scenes is not a list."
-                )
-
-            if not data["scenes"]:
-
-                raise RuntimeError(
-                    "Gemini returned zero scenes."
-                )
-
-            for scene in data["scenes"]:
-
-                if not isinstance(
-                    scene,
-                    dict,
-                ):
-
-                    raise RuntimeError(
-                        "Gemini returned an invalid scene."
-                    )
-
-                if "narration" not in scene:
-
-                    raise RuntimeError(
-                        "Scene is missing narration."
-                    )
-
-                if not isinstance(
-                    scene["narration"],
-                    str,
-                ):
-
-                    raise RuntimeError(
-                        "Scene narration is not a string."
-                    )
-
-                scene[
-                    "narration"
-                ] = scene[
-                    "narration"
-                ].strip()
-
-                if not scene[
-                    "narration"
-                ]:
-
-                    raise RuntimeError(
-                        "Scene has empty narration."
-                    )
-
-                if "visual_type" not in scene:
-
-                    raise RuntimeError(
-                        "Scene is missing visual_type."
-                    )
-
-                if "visual_query" not in scene:
-
-                    raise RuntimeError(
-                        "Scene is missing visual_query."
-                    )
-
-                if scene[
-                    "visual_type"
-                ] not in (
-                    "literal",
-                    "abstract",
-                ):
-
-                    raise RuntimeError(
-                        "Invalid visual_type: "
-                        + str(
-                            scene[
-                                "visual_type"
-                            ]
-                        )
-                    )
-
-                scene[
-                    "visual_query"
-                ] = str(
-                    scene[
-                        "visual_query"
-                    ]
-                ).strip()
-
-                if not scene[
-                    "visual_query"
-                ]:
-
-                    raise RuntimeError(
-                        "Scene has empty visual_query."
-                    )
-
-            # ------------------------------------------------------
-            # VALIDATE HASHTAGS
-            # ------------------------------------------------------
-
-            if "hashtags" not in data:
-
-                data["hashtags"] = [
-                    "#shorts",
-                    "#space",
-                    "#facts",
-                ]
-
-            if not isinstance(
-                data["hashtags"],
-                list,
-            ):
-
-                data["hashtags"] = [
-                    "#shorts",
-                    "#space",
-                    "#facts",
-                ]
-
-            # ------------------------------------------------------
-            # SUCCESS
-            # ------------------------------------------------------
-
-            print(
-                "\n      "
-                f"Gemini succeeded with: {model}"
-            )
-
-            print(
-                f"      Generated "
-                f"{len(data['scenes'])} scenes."
-            )
-
-            return data
 
         except Exception as e:
 
             last_error = e
 
             print(
-                f"      Model {model} failed:"
+                f"      Model failed: {e}"
             )
 
-            print(
-                f"      {e}"
-            )
-
-            # ------------------------------------------------------
-            # UNAVAILABLE MODEL
-            # ------------------------------------------------------
-
-            if is_model_unavailable_error(
-                e
+            if (
+                is_model_unavailable_error(e)
+                or is_gemini_retryable_error(e)
             ):
 
                 print(
-                    f"      Model {model} is unavailable."
-                )
-
-                print(
-                    "      Moving to next model..."
+                    "      Trying next Gemini model..."
                 )
 
                 continue
 
-            # ------------------------------------------------------
-            # TEMPORARY ERROR
-            # ------------------------------------------------------
-
-            if is_gemini_retryable_error(
-                e
-            ):
-
-                print(
-                    f"      Model {model} remains "
-                    "unavailable after retries."
-                )
-
-                print(
-                    "      Moving to next model..."
-                )
-
-                continue
-
-            # ------------------------------------------------------
-            # BAD RESPONSE
-            #
-            # Try another model rather than killing the entire run.
-            # ------------------------------------------------------
-
             print(
-                "      Response was unusable."
+                "      Trying next model anyway..."
             )
-
-            print(
-                "      Moving to next model..."
-            )
-
-            continue
-
-    # --------------------------------------------------------------
-    # EVERYTHING FAILED
-    # --------------------------------------------------------------
 
     raise RuntimeError(
         "All available Gemini models failed. "
@@ -1372,13 +874,647 @@ def generate_script(
 
 
 # ==================================================================
+# TOPIC SELECTION
+# ==================================================================
+
+TOPIC_SELECTOR_PROMPT = """
+You are the topic editor for a YouTube Shorts channel.
+
+Today's content candidates are below.
+
+Your job is to select ONE topic that has the strongest potential
+for a broad audience.
+
+Prioritize:
+
+1. Immediate curiosity
+2. Easy-to-understand premise
+3. A surprising fact or reversal
+4. Strong visual possibilities
+5. Enough substance for 30–45 seconds
+6. A story that can be understood without prior knowledge
+7. Factual reliability
+
+Avoid:
+
+- Extremely obscure subjects with no clear hook
+- Topics requiring lots of dates or names
+- Political persuasion
+- Unverified conspiracy theories
+- Repetitive topics
+- Generic trivia with an obvious answer
+- Clickbait that the facts cannot support
+
+Do not explain your choice.
+
+Return ONLY JSON:
+
+{
+  "selected_index": 0,
+  "topic": "short topic description",
+  "category": "on_this_day",
+  "angle": "the specific story angle",
+  "source_summary": "brief factual basis"
+}
+
+CANDIDATES:
+
+{candidates}
+"""
+
+
+def select_topic(candidates):
+
+    if not candidates:
+        raise RuntimeError(
+            "No topic candidates available."
+        )
+
+    compact = []
+
+    for i, item in enumerate(
+        candidates
+    ):
+
+        compact.append(
+            {
+                "index": i,
+                **item,
+            }
+        )
+
+    prompt = TOPIC_SELECTOR_PROMPT.format(
+        candidates=json.dumps(
+            compact,
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+    result = call_gemini_json(
+        prompt,
+        temperature=0.5,
+    )
+
+    index = result.get(
+        "selected_index"
+    )
+
+    try:
+        index = int(index)
+    except Exception:
+        index = 0
+
+    if index < 0 or index >= len(
+        candidates
+    ):
+        index = 0
+
+    selected = candidates[index]
+
+    selected = dict(
+        selected
+    )
+
+    selected["topic"] = result.get(
+        "topic",
+        selected.get(
+            "text",
+            selected.get(
+                "question",
+                "interesting historical fact",
+            ),
+        ),
+    )
+
+    selected["angle"] = result.get(
+        "angle",
+        "",
+    )
+
+    selected["source_summary"] = result.get(
+        "source_summary",
+        "",
+    )
+
+    return selected
+
+
+# ==================================================================
+# DYNAMIC TOPIC INGESTION
+# ==================================================================
+
+def get_dynamic_topic():
+
+    weighted_source = random.choices(
+        [
+            "on_this_day",
+            "trivia",
+        ],
+        weights=[
+            0.70,
+            0.30,
+        ],
+        k=1,
+    )[0]
+
+    candidates = []
+
+    if weighted_source == "on_this_day":
+
+        candidates = fetch_on_this_day()
+
+        if candidates:
+
+            return select_topic(
+                candidates
+            )
+
+        print(
+            "      Falling back to trivia."
+        )
+
+        candidates = fetch_trivia()
+
+        if candidates:
+            return select_topic(
+                candidates
+            )
+
+    else:
+
+        candidates = fetch_trivia()
+
+        if candidates:
+
+            return select_topic(
+                candidates
+            )
+
+        print(
+            "      Falling back to On This Day."
+        )
+
+        candidates = fetch_on_this_day()
+
+        if candidates:
+            return select_topic(
+                candidates
+            )
+
+    # --------------------------------------------------------------
+    # Last-resort static topic.
+    # --------------------------------------------------------------
+
+    print(
+        "      APIs unavailable."
+    )
+
+    print(
+        "      Using fallback topic."
+    )
+
+    fallback = random.choice(
+        FALLBACK_TOPICS
+    )
+
+    return {
+        "source": "fallback",
+        "source_id": (
+            f"fallback-{hash(fallback['topic'])}"
+        ),
+        "topic": fallback["topic"],
+        "category": fallback["category"],
+        "angle": "",
+        "source_summary": "",
+    }
+
+
+# ==================================================================
+# SCRIPT PROMPT
+# ==================================================================
+
+SCRIPT_PROMPT = """
+You are the lead writer for a high-quality YouTube Shorts channel.
+
+Write a 30–45 second factual Short.
+
+TOPIC:
+{topic}
+
+CATEGORY:
+{category}
+
+ANGLE:
+{angle}
+
+SOURCE INFORMATION:
+{source_summary}
+
+SOURCE MATERIAL:
+{source_material}
+
+RECENT VIDEO TITLES:
+{recent_titles}
+
+Your job is NOT to write like a documentary.
+
+Write like a smart person telling a friend something they genuinely
+wouldn't expect.
+
+STORY STRUCTURE:
+
+1. HOOK — first 1–2 sentences
+   Immediately reveal the strange, surprising, or useful part.
+
+2. CONTEXT
+   Give only the minimum information needed to understand the story.
+
+3. ESCALATION
+   Introduce the detail that makes the story more interesting.
+
+4. PAYOFF
+   Give the strongest fact near the end.
+
+5. ENDING
+   Make the final sentence either:
+   - naturally loop into the beginning, OR
+   - deliver a short relevant punchline.
+
+STYLE:
+
+- Conversational.
+- Natural contractions.
+- Short sentences mixed with occasional longer ones.
+- No "Did you know?"
+- No "Prepare to have your mind blown."
+- No "This isn't science fiction..."
+- No fake suspense.
+- No repetitive "But here's the crazy part."
+- No unnecessary dates.
+- No unnecessary names.
+- No exaggerated claims.
+- No unsupported claims.
+- Never invent facts.
+- Avoid sounding like AI.
+- Avoid repeating the title in the narration.
+
+The first sentence must be strong enough to stop someone scrolling.
+
+The entire narration should normally be about 80–110 words.
+
+CAPTIONS:
+
+For every scene, provide 2–5 short caption chunks.
+
+Each chunk should contain only a few words.
+
+Bad:
+"Ancient Roman engineers built aqueducts that transported water
+across enormous distances."
+
+Good:
+"ROMAN ENGINEERS"
+"BUILT AQUEDUCTS"
+"THAT MOVED WATER"
+"FOR MILES"
+
+Caption chunks should be:
+- easy to read instantly
+- visually punchy
+- synchronized naturally with narration
+- maximum 6 words
+- normally 2–5 words
+- written in uppercase
+
+VISUALS:
+
+Each scene needs a visual.
+
+Use "literal" when stock footage is likely to exist.
+
+Use "abstract" when an AI-generated image is better.
+
+For literal visuals:
+visual_query must be 3–6 words.
+
+For abstract visuals:
+visual_query must be a detailed cinematic vertical-image prompt.
+
+Return ONLY valid JSON.
+
+Exact structure:
+
+{{
+  "title": "under 60 characters",
+  "hook": "first narration sentence",
+  "ending_style": "loop",
+  "scenes": [
+    {{
+      "narration": "scene narration",
+      "caption_chunks": [
+        "SHORT CAPTION",
+        "CHUNK HERE"
+      ],
+      "visual_type": "literal",
+      "visual_query": "3-6 word search"
+    }}
+  ],
+  "hashtags": [
+    "#shorts",
+    "#history",
+    "#facts"
+  ]
+}}
+
+IMPORTANT:
+The narration across all scenes must form one continuous story.
+
+Do not make every scene feel like a separate fact.
+"""
+
+
+# ==================================================================
+# SCRIPT GENERATION
+# ==================================================================
+
+def generate_script(
+    topic_data,
+    recent_titles,
+):
+
+    source_material = json.dumps(
+        topic_data,
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    recent_text = (
+        "\n".join(
+            f"- {title}"
+            for title in recent_titles
+        )
+        if recent_titles
+        else "None"
+    )
+
+    prompt = SCRIPT_PROMPT.format(
+        topic=topic_data.get(
+            "topic",
+            "",
+        ),
+        category=topic_data.get(
+            "category",
+            "",
+        ),
+        angle=topic_data.get(
+            "angle",
+            "",
+        ),
+        source_summary=topic_data.get(
+            "source_summary",
+            "",
+        ),
+        source_material=source_material,
+        recent_titles=recent_text,
+    )
+
+    data = call_gemini_json(
+        prompt,
+        temperature=0.8,
+    )
+
+    validate_script(data)
+
+    return data
+
+
+# ==================================================================
+# SCRIPT VALIDATION
+# ==================================================================
+
+def validate_script(data):
+
+    if not isinstance(
+        data,
+        dict,
+    ):
+        raise RuntimeError(
+            "Gemini script is not an object."
+        )
+
+    title = data.get(
+        "title",
+        "",
+    )
+
+    if not isinstance(
+        title,
+        str,
+    ):
+
+        raise RuntimeError(
+            "Title is not a string."
+        )
+
+    title = title.strip()
+
+    if not title:
+
+        raise RuntimeError(
+            "Empty title."
+        )
+
+    data["title"] = title[:100]
+
+    scenes = data.get(
+        "scenes"
+    )
+
+    if not isinstance(
+        scenes,
+        list,
+    ):
+
+        raise RuntimeError(
+            "Scenes is not a list."
+        )
+
+    if not scenes:
+
+        raise RuntimeError(
+            "No scenes returned."
+        )
+
+    if len(scenes) > 10:
+
+        raise RuntimeError(
+            "Too many scenes."
+        )
+
+    for scene in scenes:
+
+        if not isinstance(
+            scene,
+            dict,
+        ):
+
+            raise RuntimeError(
+                "Invalid scene."
+            )
+
+        narration = scene.get(
+            "narration",
+            "",
+        )
+
+        if not isinstance(
+            narration,
+            str,
+        ) or not narration.strip():
+
+            raise RuntimeError(
+                "Scene has no narration."
+            )
+
+        scene[
+            "narration"
+        ] = narration.strip()
+
+        visual_type = scene.get(
+            "visual_type"
+        )
+
+        if visual_type not in (
+            "literal",
+            "abstract",
+        ):
+
+            raise RuntimeError(
+                "Invalid visual_type."
+            )
+
+        visual_query = scene.get(
+            "visual_query",
+            "",
+        )
+
+        if not str(
+            visual_query
+        ).strip():
+
+            raise RuntimeError(
+                "Scene has no visual query."
+            )
+
+        scene[
+            "visual_query"
+        ] = str(
+            visual_query
+        ).strip()
+
+        chunks = scene.get(
+            "caption_chunks"
+        )
+
+        if not isinstance(
+            chunks,
+            list,
+        ) or not chunks:
+
+            # Safe fallback if Gemini forgets.
+            words = narration.split()
+
+            chunks = []
+
+            for start in range(
+                0,
+                len(words),
+                4,
+            ):
+
+                chunks.append(
+                    " ".join(
+                        words[
+                            start:start + 4
+                        ]
+                    ).upper()
+                )
+
+        cleaned_chunks = []
+
+        for chunk in chunks:
+
+            chunk = str(
+                chunk
+            ).strip()
+
+            if not chunk:
+                continue
+
+            chunk = re.sub(
+                r"\s+",
+                " ",
+                chunk,
+            )
+
+            cleaned_chunks.append(
+                chunk.upper()
+            )
+
+        if not cleaned_chunks:
+
+            raise RuntimeError(
+                "Scene has no usable captions."
+            )
+
+        scene[
+            "caption_chunks"
+        ] = cleaned_chunks
+
+    hashtags = data.get(
+        "hashtags",
+        [],
+    )
+
+    if not isinstance(
+        hashtags,
+        list,
+    ):
+
+        hashtags = []
+
+    if not hashtags:
+
+        hashtags = [
+            "#shorts",
+            "#facts",
+            "#history",
+        ]
+
+    data["hashtags"] = [
+        str(x)
+        for x in hashtags[:6]
+    ]
+
+    if data.get(
+        "ending_style"
+    ) not in (
+        "loop",
+        "joke",
+    ):
+
+        data["ending_style"] = "loop"
+
+
+# ==================================================================
 # EDGE TTS
 # ==================================================================
 
 async def _synthesize(
-    text: str,
-    voice: str,
-    out_path: Path,
+    text,
+    voice,
+    out_path,
 ):
 
     import edge_tts
@@ -1394,9 +1530,9 @@ async def _synthesize(
 
 
 def synthesize_scene_audio(
-    scenes: list,
-    run_dir: Path,
-) -> list:
+    scenes,
+    run_dir,
+):
 
     from moviepy import AudioFileClip
 
@@ -1450,16 +1586,11 @@ def synthesize_scene_audio(
 # ==================================================================
 
 def fetch_pexels_video(
-    query: str,
-    out_path: Path,
-) -> Path | None:
+    query,
+    out_path,
+):
 
     if not PEXELS_API_KEY:
-
-        print(
-            "      PEXELS_API_KEY missing."
-        )
-
         return None
 
     headers = {
@@ -1473,21 +1604,21 @@ def fetch_pexels_video(
     params = {
         "query": query,
         "orientation": "portrait",
-        "per_page": 5,
+        "per_page": 8,
     }
 
     try:
 
-        r = requests.get(
+        response = requests.get(
             url,
             headers=headers,
             params=params,
             timeout=20,
         )
 
-        r.raise_for_status()
+        response.raise_for_status()
 
-        videos = r.json().get(
+        videos = response.json().get(
             "videos",
             [],
         )
@@ -1495,37 +1626,91 @@ def fetch_pexels_video(
         if not videos:
             return None
 
+        # Prefer videos with useful dimensions.
+        valid = []
+
+        for video in videos:
+
+            files = video.get(
+                "video_files",
+                [],
+            )
+
+            if files:
+                valid.append(
+                    video
+                )
+
+        if not valid:
+            return None
+
         video = random.choice(
-            videos[
-                :min(3, len(videos))
+            valid[
+                :min(5, len(valid))
             ]
         )
 
+        files = video.get(
+            "video_files",
+            [],
+        )
+
         files = sorted(
-            video["video_files"],
-            key=lambda f: f.get(
+            files,
+            key=lambda f: (
+                f.get(
+                    "width",
+                    0,
+                )
+                * f.get(
+                    "height",
+                    0,
+                )
+            ),
+            reverse=True,
+        )
+
+        chosen = None
+
+        for file_info in files:
+
+            width = file_info.get(
                 "width",
                 0,
-            ),
+            )
+
+            height = file_info.get(
+                "height",
+                0,
+            )
+
+            if (
+                width >= 720
+                or height >= 720
+            ):
+
+                chosen = file_info
+                break
+
+        if chosen is None:
+            chosen = files[0]
+
+        link = chosen.get(
+            "link"
         )
 
-        chosen = next(
-            (
-                f
-                for f in files
-                if f.get("width", 0)
-                >= 720
-            ),
-            files[-1],
+        if not link:
+            return None
+
+        video_response = requests.get(
+            link,
+            timeout=45,
         )
 
-        video_data = requests.get(
-            chosen["link"],
-            timeout=30,
-        ).content
+        video_response.raise_for_status()
 
         out_path.write_bytes(
-            video_data
+            video_response.content
         )
 
         return out_path
@@ -1543,14 +1728,12 @@ def fetch_pexels_video(
 # POLLINATIONS
 # ==================================================================
 
-def _fetch_pollinations_image_once(
-    prompt: str,
-    out_path: Path,
-) -> Path:
+def fetch_pollinations_image_once(
+    prompt,
+    out_path,
+):
 
-    import urllib.parse
-
-    encoded = urllib.parse.quote(
+    encoded = quote(
         prompt
     )
 
@@ -1562,14 +1745,14 @@ def _fetch_pollinations_image_once(
         "&nologo=true"
     )
 
-    r = requests.get(
+    response = requests.get(
         url,
-        timeout=60,
+        timeout=90,
     )
 
-    r.raise_for_status()
+    response.raise_for_status()
 
-    content_type = r.headers.get(
+    content_type = response.headers.get(
         "content-type",
         "",
     )
@@ -1579,22 +1762,20 @@ def _fetch_pollinations_image_once(
     ):
 
         raise RuntimeError(
-            "Pollinations did not return "
-            "an image. "
-            f"Content-Type: {content_type}"
+            "Pollinations did not return an image."
         )
 
     out_path.write_bytes(
-        r.content
+        response.content
     )
 
     return out_path
 
 
-def _generate_fallback_image(
-    prompt: str,
-    out_path: Path,
-) -> Path:
+def generate_fallback_image(
+    prompt,
+    out_path,
+):
 
     from PIL import (
         Image,
@@ -1602,15 +1783,13 @@ def _generate_fallback_image(
         ImageFont,
     )
 
-    import textwrap
-
     img = Image.new(
         "RGB",
         (
             VIDEO_W,
             VIDEO_H,
         ),
-        color=(10, 10, 20),
+        (8, 8, 18),
     )
 
     draw = ImageDraw.Draw(
@@ -1621,13 +1800,10 @@ def _generate_fallback_image(
         VIDEO_H
     ):
 
-        shade = int(
-            10
-            + (
-                y
-                / VIDEO_H
-            )
-            * 40
+        ratio = y / VIDEO_H
+
+        value = int(
+            8 + ratio * 42
         )
 
         draw.line(
@@ -1636,9 +1812,12 @@ def _generate_fallback_image(
                 (VIDEO_W, y),
             ],
             fill=(
-                shade,
-                shade,
-                shade + 15,
+                value,
+                value,
+                min(
+                    255,
+                    value + 18,
+                ),
             ),
         )
 
@@ -1646,16 +1825,15 @@ def _generate_fallback_image(
 
         font = ImageFont.truetype(
             CAPTION_FONT_PATH,
-            60,
+            58,
         )
 
     except Exception:
 
         font = ImageFont.load_default()
 
-    wrapped = textwrap.fill(
-        prompt,
-        width=28,
+    text = str(
+        prompt
     )
 
     draw.multiline_text(
@@ -1663,13 +1841,9 @@ def _generate_fallback_image(
             80,
             VIDEO_H // 2 - 150,
         ),
-        wrapped,
-        fill=(
-            220,
-            220,
-            220,
-        ),
+        text[:500],
         font=font,
+        fill=(230, 230, 230),
         spacing=16,
     )
 
@@ -1681,59 +1855,58 @@ def _generate_fallback_image(
 
 
 def fetch_pollinations_image(
-    prompt: str,
-    out_path: Path,
-) -> Path:
+    prompt,
+    out_path,
+):
 
     try:
 
         return retry_with_backoff(
-            _fetch_pollinations_image_once,
+            fetch_pollinations_image_once,
             prompt,
             out_path,
-            retries=3,
+            retries=2,
             base_delay=5,
         )
 
     except Exception as e:
 
         print(
-            "      Pollinations failed "
-            "after retries."
+            f"      Pollinations failed: {e}"
         )
 
         print(
-            f"      Using local fallback: {e}"
+            "      Using local fallback image."
         )
 
-        return _generate_fallback_image(
+        return generate_fallback_image(
             prompt,
             out_path,
         )
 
 
 # ==================================================================
-# VISUAL SELECTION
+# VISUALS
 # ==================================================================
 
 def fetch_visual_for_scene(
-    scene: dict,
-    index: int,
-    run_dir: Path,
-) -> dict:
+    scene,
+    index,
+    run_dir,
+):
 
     if scene[
         "visual_type"
     ] == "literal":
 
-        out_path = (
+        path = (
             run_dir
             / f"visual_{index}.mp4"
         )
 
         result = fetch_pexels_video(
             scene["visual_query"],
-            out_path,
+            path,
         )
 
         if result:
@@ -1744,41 +1917,26 @@ def fetch_visual_for_scene(
             }
 
         print(
-            "      No Pexels video found."
+            "      Pexels unavailable."
         )
 
         print(
-            "      Falling back to Pollinations."
+            "      Using AI visual instead."
         )
 
-        fallback_path = (
-            run_dir
-            / f"visual_{index}.jpg"
-        )
-
-        fetch_pollinations_image(
-            scene["visual_query"],
-            fallback_path,
-        )
-
-        return {
-            "type": "image",
-            "path": fallback_path,
-        }
-
-    out_path = (
+    path = (
         run_dir
         / f"visual_{index}.jpg"
     )
 
     fetch_pollinations_image(
         scene["visual_query"],
-        out_path,
+        path,
     )
 
     return {
         "type": "image",
-        "path": out_path,
+        "path": path,
     }
 
 
@@ -1799,19 +1957,21 @@ def add_background_music(
     if not BGM_DIR.exists():
         return final_clip
 
-    bgm_files = list(
-        BGM_DIR.glob("*.mp3")
+    files = list(
+        BGM_DIR.glob(
+            "*.mp3"
+        )
     )
 
-    if not bgm_files:
+    if not files:
         return final_clip
 
-    bgm_path = random.choice(
-        bgm_files
+    path = random.choice(
+        files
     )
 
     bgm = AudioFileClip(
-        str(bgm_path)
+        str(path)
     )
 
     if bgm.duration < final_clip.duration:
@@ -1834,21 +1994,110 @@ def add_background_music(
     bgm = bgm.with_effects(
         [
             afx.MultiplyVolume(
-                0.10
+                0.08
             )
         ]
     )
 
-    combined_audio = CompositeAudioClip(
-        [
-            final_clip.audio,
-            bgm,
-        ]
+    return final_clip.with_audio(
+        CompositeAudioClip(
+            [
+                final_clip.audio,
+                bgm,
+            ]
+        )
     )
 
-    return final_clip.with_audio(
-        combined_audio
+
+# ==================================================================
+# CAPTION TIMING
+# ==================================================================
+
+def build_caption_timing(
+    narration,
+    caption_chunks,
+    duration,
+):
+
+    words = narration.split()
+
+    if not words:
+        return []
+
+    total_words = len(
+        words
     )
+
+    chunks = []
+
+    for chunk in caption_chunks:
+
+        chunk_words = chunk.split()
+
+        if chunk_words:
+            chunks.append(
+                {
+                    "text": chunk,
+                    "words": len(
+                        chunk_words
+                    ),
+                }
+            )
+
+    if not chunks:
+
+        return [
+            {
+                "text": narration.upper(),
+                "start": 0,
+                "end": duration,
+            }
+        ]
+
+    total_chunk_words = sum(
+        x["words"]
+        for x in chunks
+    )
+
+    if total_chunk_words <= 0:
+        total_chunk_words = total_words
+
+    result = []
+
+    current = 0.0
+
+    for index, chunk in enumerate(
+        chunks
+    ):
+
+        if index == len(chunks) - 1:
+
+            end = duration
+
+        else:
+
+            fraction = (
+                chunk["words"]
+                / total_chunk_words
+            )
+
+            end = (
+                current
+                + duration
+                * fraction
+            )
+
+        result.append(
+            {
+                "text": chunk["text"],
+                "start": current,
+                "end": end,
+            }
+        )
+
+        current = end
+
+    return result
 
 
 # ==================================================================
@@ -1856,11 +2105,11 @@ def add_background_music(
 # ==================================================================
 
 def build_video(
-    script: dict,
-    audio_clips: list,
-    visuals: list,
-    run_dir: Path,
-) -> Path:
+    script,
+    audio_clips,
+    visuals,
+    run_dir,
+):
 
     from moviepy import (
         AudioFileClip,
@@ -1877,7 +2126,7 @@ def build_video(
     ).exists():
 
         raise FileNotFoundError(
-            "Caption font does not exist:\n"
+            "Missing caption font:\n"
             f"{CAPTION_FONT_PATH}\n\n"
             "Commit Anton-Regular.ttf to the "
             "repository root."
@@ -1900,7 +2149,7 @@ def build_video(
         visual = visuals[i]
 
         # ----------------------------------------------------------
-        # VIDEO VISUAL
+        # VISUAL
         # ----------------------------------------------------------
 
         if visual[
@@ -1930,10 +2179,6 @@ def build_video(
                     duration,
                 )
 
-        # ----------------------------------------------------------
-        # IMAGE VISUAL
-        # ----------------------------------------------------------
-
         else:
 
             clip = (
@@ -1948,7 +2193,7 @@ def build_video(
             )
 
         # ----------------------------------------------------------
-        # RESIZE
+        # FILL VERTICAL FRAME
         # ----------------------------------------------------------
 
         clip = clip.with_effects(
@@ -1957,39 +2202,106 @@ def build_video(
                     height=VIDEO_H
                 )
             ]
-        ).with_position(
+        )
+
+        # Crop any width overflow.
+        if clip.w > VIDEO_W:
+
+            clip = clip.with_effects(
+                [
+                    vfx.Crop(
+                        x_center=clip.w / 2,
+                        width=VIDEO_W,
+                    )
+                ]
+            )
+
+        clip = clip.with_position(
             "center"
         )
 
         # ----------------------------------------------------------
-        # CAPTIONS
+        # CAPTION CHUNKS
         # ----------------------------------------------------------
 
-        caption = TextClip(
-            font=CAPTION_FONT_PATH,
-            text=scene["narration"],
-            font_size=54,
-            color="yellow",
-            stroke_color="black",
-            stroke_width=2,
-            method="caption",
-            size=(
-                VIDEO_W - 120,
-                None,
-            ),
-            text_align="center",
-            duration=duration,
-        ).with_position(
-            (
-                "center",
-                "center",
-            )
+        caption_timing = build_caption_timing(
+            scene["narration"],
+            scene["caption_chunks"],
+            duration,
         )
+
+        caption_clips = []
+
+        for caption in caption_timing:
+
+            text = caption["text"]
+
+            try:
+
+                txt = TextClip(
+                    font=CAPTION_FONT_PATH,
+                    text=text,
+                    font_size=78,
+                    color="white",
+                    stroke_color="black",
+                    stroke_width=5,
+                    method="caption",
+                    size=(
+                        VIDEO_W - 180,
+                        300,
+                    ),
+                    text_align="center",
+                )
+
+            except TypeError:
+
+                txt = TextClip(
+                    font=CAPTION_FONT_PATH,
+                    text=text,
+                    font_size=78,
+                    color="white",
+                    stroke_color="black",
+                    stroke_width=5,
+                    method="caption",
+                    size=(
+                        VIDEO_W - 180,
+                        None,
+                    ),
+                    text_align="center",
+                )
+
+            txt = (
+                txt
+                .with_start(
+                    caption["start"]
+                )
+                .with_duration(
+                    max(
+                        0.1,
+                        caption["end"]
+                        - caption["start"],
+                    )
+                )
+                .with_position(
+                    (
+                        "center",
+                        1250,
+                    )
+                )
+            )
+
+            caption_clips.append(
+                txt
+            )
+
+        # ----------------------------------------------------------
+        # SCENE COMPOSITE
+        # ----------------------------------------------------------
 
         composite = CompositeVideoClip(
             [
                 clip,
-                caption,
+                *caption_clips,
             ],
             size=(
                 VIDEO_W,
@@ -2015,7 +2327,7 @@ def build_video(
     )
 
     # --------------------------------------------------------------
-    # BACKGROUND MUSIC
+    # MUSIC
     # --------------------------------------------------------------
 
     final = add_background_music(
@@ -2023,7 +2335,7 @@ def build_video(
     )
 
     # --------------------------------------------------------------
-    # WRITE VIDEO
+    # OUTPUT
     # --------------------------------------------------------------
 
     out_path = (
@@ -2036,6 +2348,7 @@ def build_video(
         fps=30,
         codec="libx264",
         audio_codec="aac",
+        threads=2,
     )
 
     try:
@@ -2054,31 +2367,12 @@ def run_pipeline():
 
     validate_environment()
 
-    # --------------------------------------------------------------
-    # SELECT TOPIC
-    # --------------------------------------------------------------
-
-    (
-        topic_entry,
-        category,
-        progress,
-    ) = get_next_topic()
-
-    topic = topic_entry["topic"]
-
-    ending_style = random.choice(
-        [
-            "loop",
-            "joke",
-        ]
-    )
-
     print(
         "\n=================================================="
     )
 
     print(
-        "SPACE FACTS PIPELINE"
+        "SPACE FACTS PIPELINE v5"
     )
 
     print(
@@ -2086,7 +2380,32 @@ def run_pipeline():
     )
 
     print(
-        f"Topic: {topic}"
+        "Fetching a fresh topic..."
+    )
+
+    # --------------------------------------------------------------
+    # 1. TOPIC
+    # --------------------------------------------------------------
+
+    topic_data = get_dynamic_topic()
+
+    topic = topic_data.get(
+        "topic",
+        "interesting historical fact",
+    )
+
+    category = topic_data.get(
+        "category",
+        "history",
+    )
+
+    source_id = topic_data.get(
+        "source_id",
+        "",
+    )
+
+    print(
+        f"\nTopic: {topic}"
     )
 
     print(
@@ -2094,15 +2413,15 @@ def run_pipeline():
     )
 
     print(
-        f"Ending: {ending_style}"
+        f"Source: {topic_data.get('source', 'unknown')}"
     )
 
     # --------------------------------------------------------------
-    # 1. GEMINI
+    # 2. SCRIPT
     # --------------------------------------------------------------
 
     print(
-        "\n[1/5] Generating script..."
+        "\n[1/5] Generating story..."
     )
 
     recent_titles = get_recent_titles()
@@ -2110,9 +2429,8 @@ def run_pipeline():
     try:
 
         script = generate_script(
-            topic,
-            ending_style,
-            recent_titles=recent_titles,
+            topic_data,
+            recent_titles,
         )
 
     except Exception as e:
@@ -2122,7 +2440,7 @@ def run_pipeline():
         )
 
         print(
-            "GEMINI FAILED"
+            "SCRIPT GENERATION FAILED"
         )
 
         print(
@@ -2134,26 +2452,31 @@ def run_pipeline():
         )
 
         print(
-            "\nThe topic was NOT marked as used."
-        )
-
-        print(
-            "The next successful run can retry it."
+            "\nThe source topic was NOT marked as used."
         )
 
         raise
 
-    # --------------------------------------------------------------
-    # Mark topic used ONLY after Gemini succeeds.
-    # --------------------------------------------------------------
-
-    commit_topic_progress(
-        category,
-        progress,
+    print(
+        f"\n      Title: {script['title']}"
     )
 
     print(
-        f"      Title: {script['title']}"
+        f"      Scenes: {len(script['scenes'])}"
+    )
+
+    # --------------------------------------------------------------
+    # Mark topic used ONLY after successful script generation.
+    # --------------------------------------------------------------
+
+    if source_id:
+
+        remember_source(
+            source_id
+        )
+
+    remember_topic(
+        topic
     )
 
     record_used_title(
@@ -2180,7 +2503,7 @@ def run_pipeline():
         / safe_title.replace(
             " ",
             "_",
-        )[:40]
+        )[:50]
     )
 
     run_dir.mkdir(
@@ -2193,14 +2516,18 @@ def run_pipeline():
         / "script.json"
     ).write_text(
         json.dumps(
-            script,
+            {
+                "topic": topic_data,
+                "script": script,
+            },
             indent=2,
+            ensure_ascii=False,
         ),
         encoding="utf-8",
     )
 
     # --------------------------------------------------------------
-    # 2. AUDIO
+    # 3. AUDIO
     # --------------------------------------------------------------
 
     print(
@@ -2215,7 +2542,7 @@ def run_pipeline():
     )
 
     # --------------------------------------------------------------
-    # 3. VISUALS
+    # 4. VISUALS
     # --------------------------------------------------------------
 
     print(
@@ -2231,7 +2558,8 @@ def run_pipeline():
         print(
             f"      Scene {i + 1}/"
             f"{len(script['scenes'])}: "
-            f"{scene['visual_type']}"
+            f"{scene['visual_type']} — "
+            f"{scene['visual_query']}"
         )
 
         visual = fetch_visual_for_scene(
@@ -2245,11 +2573,11 @@ def run_pipeline():
         )
 
     # --------------------------------------------------------------
-    # 4. VIDEO
+    # 5. VIDEO
     # --------------------------------------------------------------
 
     print(
-        "\n[4/5] Assembling final video..."
+        "\n[4/5] Assembling Short..."
     )
 
     final_path = build_video(
@@ -2260,7 +2588,7 @@ def run_pipeline():
     )
 
     # --------------------------------------------------------------
-    # 5. YOUTUBE
+    # 6. YOUTUBE
     # --------------------------------------------------------------
 
     print(
@@ -2268,9 +2596,14 @@ def run_pipeline():
     )
 
     description = (
-        f"{script.get('hook', '')}"
-        f"\n\n"
-        f"{' '.join(script['hashtags'])}"
+        script.get(
+            "hook",
+            "",
+        )
+        + "\n\n"
+        + " ".join(
+            script["hashtags"]
+        )
     )
 
     upload_result = (
@@ -2285,9 +2618,7 @@ def run_pipeline():
                     "#",
                     "",
                 )
-                for h in script[
-                    "hashtags"
-                ]
+                for h in script["hashtags"]
             ],
             privacy_status="public",
         )
@@ -2295,15 +2626,14 @@ def run_pipeline():
 
     video_id = upload_result["id"]
 
-    # --------------------------------------------------------------
-    # LOG SUCCESSFUL UPLOAD
-    # --------------------------------------------------------------
-
     log_upload(
         video_id,
         script["title"],
         category,
-        ending_style,
+        script.get(
+            "ending_style",
+            "loop",
+        ),
     )
 
     print(
