@@ -21,6 +21,14 @@ IMPORTANT:
   generates a valid script.
 - The JSON prompt uses escaped braces so .format() cannot
   accidentally interpret the JSON as Python format fields.
+
+CHANGELOG (this version)
+- Added a third topic lane: "building" — simple/clever
+  construction and engineering tricks throughout history.
+  Split out of "history" because "The Simple Sand Trick Used to
+  Build the Pyramids" (a history-lane video) was the channel's
+  top performer with casual viewers, so this lane gets its own
+  weight instead of competing inside the general history pool.
 """
 
 import os
@@ -80,9 +88,14 @@ BGM_DIR = Path(__file__).parent / "bgm"
 # CATEGORY WEIGHTS
 # ==================================================================
 
+# "building" gets a meaningful share out of the gate since it's
+# essentially a spin-off of the channel's actual top casual-viewer
+# performer (the pyramids sand-trick video). Adjust these by hand
+# once a few weeks of real per-category data comes in.
 CATEGORY_WEIGHTS = {
-    "space": 0.55,
-    "history": 0.45,
+    "space": 0.35,
+    "history": 0.30,
+    "building": 0.35,
 }
 
 
@@ -198,10 +211,6 @@ TOPIC_POOL = [
         "category": "history",
     },
     {
-        "topic": "how the pyramids at Giza were actually built without modern tools",
-        "category": "history",
-    },
-    {
         "topic": "what really happened to the Library of Alexandria",
         "category": "history",
     },
@@ -218,10 +227,6 @@ TOPIC_POOL = [
         "category": "history",
     },
     {
-        "topic": "how ancient Rome's concrete outlasts modern concrete",
-        "category": "history",
-    },
-    {
         "topic": "what the Dancing Plague of 1518 actually did to people",
         "category": "history",
     },
@@ -234,15 +239,7 @@ TOPIC_POOL = [
         "category": "history",
     },
     {
-        "topic": "how the Nazca Lines were made without ever being seen from above",
-        "category": "history",
-    },
-    {
         "topic": "what happened to the lost colony of Roanoke",
-        "category": "history",
-    },
-    {
-        "topic": "how the Iron Pillar of Delhi has resisted rust for over 1,600 years",
         "category": "history",
     },
     {
@@ -258,20 +255,92 @@ TOPIC_POOL = [
         "category": "history",
     },
     {
-        "topic": "why the city of Petra was carved directly into solid rock",
-        "category": "history",
-    },
-    {
-        "topic": "how the Terracotta Army was hidden and undiscovered for over 2,000 years",
-        "category": "history",
-    },
-    {
         "topic": "what really caused the sudden collapse of the Maya civilization",
         "category": "history",
     },
     {
         "topic": "why the Phaistos Disc's symbols still can't be translated",
         "category": "history",
+    },
+
+    # --------------------------------------------------------------
+    # BUILDING — simple/clever construction and engineering tricks
+    # throughout history. Split out of "history" specifically
+    # because the pyramids-sand-trick video outperformed everything
+    # else with casual viewers.
+    # --------------------------------------------------------------
+
+    {
+        "topic": "the simple sand trick used to build the pyramids at Giza",
+        "category": "building",
+    },
+    {
+        "topic": "how ancient builders moved multi-ton stones with no modern machines",
+        "category": "building",
+    },
+    {
+        "topic": "the water-leveling trick Egyptian architects used before modern tools existed",
+        "category": "building",
+    },
+    {
+        "topic": "how Roman aqueducts moved water across entire regions using only gravity",
+        "category": "building",
+    },
+    {
+        "topic": "the simple lever trick used to raise ancient obelisks upright",
+        "category": "building",
+    },
+    {
+        "topic": "how ancient underground qanats moved water with zero pumps",
+        "category": "building",
+    },
+    {
+        "topic": "the ramp trick used to carry the Great Wall of China across mountains",
+        "category": "building",
+    },
+    {
+        "topic": "the corbel arch trick ancient builders used before the true arch existed",
+        "category": "building",
+    },
+    {
+        "topic": "how Incan stone walls fit together perfectly with zero mortar",
+        "category": "building",
+    },
+    {
+        "topic": "the drainage trick that's kept Roman roads intact for 2,000 years",
+        "category": "building",
+    },
+    {
+        "topic": "how simple pulley systems let ancient workers lift multi-ton blocks",
+        "category": "building",
+    },
+    {
+        "topic": "the compression trick that lets ancient stone domes hold their own weight forever",
+        "category": "building",
+    },
+    {
+        "topic": "how ancient Persian windcatchers cooled buildings with no electricity",
+        "category": "building",
+    },
+    {
+        "topic": "the flying buttress trick that let medieval cathedrals grow impossibly tall",
+        "category": "building",
+    },
+    {
+        "topic": "how ancient Chinese builders locked wood joints together with zero nails",
+        "category": "building",
+    },
+    {
+        "topic": "the mortar recipe ancient Romans used that outlasts modern concrete",
+        "category": "building",
+    },
+    {
+        "topic": "how ancient timber-frame buildings survive earthquakes better than concrete",
+        "category": "building",
+    },
+    {
+        "topic": "the counterweight trick behind medieval cranes and trebuchets",
+        "category": "building",
     },
 ]
 
@@ -603,7 +672,8 @@ def retry_with_backoff(
 # ==================================================================
 
 SCRIPT_SYSTEM_PROMPT = """You are writing a 30-45 second YouTube Shorts script
-about one of: a space/physics fact, or a strange piece of real history.
+about one of: a space/physics fact, a strange piece of real history, or a
+simple/clever construction or engineering trick from history.
 
 ENDING STYLE FOR THIS SCRIPT: {ending_style}
 
