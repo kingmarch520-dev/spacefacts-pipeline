@@ -1,5 +1,5 @@
 """
-SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v9.1)
+SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v9.2)
 
 FORMAT:
     Interesting stock footage
@@ -45,7 +45,6 @@ import json
 import os
 import random
 import re
-import subprocess
 import sys
 import time
 import uuid
@@ -71,7 +70,7 @@ from PIL import Image, ImageDraw, ImageFont
 # CONFIG
 # ============================================================
 
-VERSION = "v9.1"
+VERSION = "v9.2"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 COVERR_API_KEY = os.environ.get("COVERR_API_KEY", "")
@@ -134,6 +133,23 @@ FOOTAGE_STYLES = [
     "ocean",
     "aviation",
     "general",
+]
+
+# Gemini fallback order.
+#
+# IMPORTANT:
+# A temporary 503/429 on one model causes the pipeline
+# to immediately try the next model instead of repeatedly
+# hammering the same unavailable model.
+GEMINI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 ]
 
 
@@ -376,6 +392,7 @@ def safe_json_loads(text: str) -> Any:
             text,
             flags=re.IGNORECASE,
         )
+
         text = re.sub(
             r"\s*```$",
             "",
@@ -384,6 +401,7 @@ def safe_json_loads(text: str) -> Any:
 
     try:
         return json.loads(text)
+
     except Exception:
         pass
 
@@ -394,7 +412,9 @@ def safe_json_loads(text: str) -> Any:
     )
 
     if match:
-        return json.loads(match.group(0))
+        return json.loads(
+            match.group(0)
+        )
 
     raise ValueError(
         "Could not extract valid JSON from Gemini."
@@ -415,6 +435,7 @@ def default_state() -> Dict[str, Any]:
 
 
 def load_state() -> Dict[str, Any]:
+
     if not STATE_FILE.exists():
         return default_state()
 
@@ -425,20 +446,33 @@ def load_state() -> Dict[str, Any]:
             )
         )
 
-        if not isinstance(data, dict):
+        if not isinstance(
+            data,
+            dict,
+        ):
             return default_state()
 
         state = default_state()
         state.update(data)
+
         return state
 
     except Exception as exc:
-        log(f"Could not load state file: {exc}")
+
+        log(
+            f"Could not load state file: {exc}"
+        )
+
         return default_state()
 
 
-def save_state(state: Dict[str, Any]) -> None:
-    temp_file = STATE_FILE.with_suffix(".tmp")
+def save_state(
+    state: Dict[str, Any],
+) -> None:
+
+    temp_file = STATE_FILE.with_suffix(
+        ".tmp"
+    )
 
     temp_file.write_text(
         json.dumps(
@@ -449,19 +483,23 @@ def save_state(state: Dict[str, Any]) -> None:
         encoding="utf-8",
     )
 
-    temp_file.replace(STATE_FILE)
+    temp_file.replace(
+        STATE_FILE
+    )
 
 
 def remember_title(
     state: Dict[str, Any],
     title: str,
 ) -> None:
+
     titles = state.setdefault(
         "recent_titles",
         [],
     )
 
     titles.append(title)
+
     state["recent_titles"] = titles[-40:]
 
 
@@ -469,6 +507,7 @@ def remember_source(
     state: Dict[str, Any],
     source_id: str,
 ) -> None:
+
     if not source_id:
         return
 
@@ -487,6 +526,7 @@ def remember_topic(
     state: Dict[str, Any],
     topic_key: str,
 ) -> None:
+
     if not topic_key:
         return
 
@@ -505,6 +545,7 @@ def remember_footage(
     state: Dict[str, Any],
     path: str,
 ) -> None:
+
     if not path:
         return
 
@@ -524,6 +565,7 @@ def remember_footage(
 # ============================================================
 
 def validate_environment() -> None:
+
     required = {
         "GEMINI_API_KEY": GEMINI_API_KEY,
         "COVERR_API_KEY": COVERR_API_KEY,
@@ -556,6 +598,7 @@ def validate_environment() -> None:
     if not Path(
         CAPTION_FONT_PATH
     ).exists():
+
         raise RuntimeError(
             f"Missing required font: "
             f"{CAPTION_FONT_PATH}"
@@ -567,6 +610,7 @@ def validate_environment() -> None:
 # ============================================================
 
 def fetch_on_this_day() -> List[Dict[str, Any]]:
+
     month = time.strftime("%m")
     day = time.strftime("%d")
 
@@ -581,26 +625,37 @@ def fetch_on_this_day() -> List[Dict[str, Any]]:
     )
 
     try:
+
         response = requests.get(
             url,
             timeout=REQUEST_TIMEOUT,
             headers={
                 "User-Agent":
-                    "SpaceFactsPipeline/9.1"
+                    "SpaceFactsPipeline/9.2"
             },
         )
 
         response.raise_for_status()
 
         data = response.json()
-        events = data.get("events", [])
+
+        events = data.get(
+            "events",
+            [],
+        )
 
         results = []
 
         for event in events:
-            year = event.get("year")
+
+            year = event.get(
+                "year"
+            )
+
             text = clean_text(
-                event.get("text")
+                event.get(
+                    "text"
+                )
             )
 
             if not text:
@@ -614,8 +669,11 @@ def fetch_on_this_day() -> List[Dict[str, Any]]:
             page_title = ""
 
             if pages:
+
                 page_title = clean_text(
-                    pages[0].get("title")
+                    pages[0].get(
+                        "title"
+                    )
                 )
 
             source_id = (
@@ -642,9 +700,11 @@ def fetch_on_this_day() -> List[Dict[str, Any]]:
         return results
 
     except Exception as exc:
+
         log(
             f"Wikimedia request failed: {exc}"
         )
+
         return []
 
 
@@ -653,6 +713,7 @@ def fetch_on_this_day() -> List[Dict[str, Any]]:
 # ============================================================
 
 def fetch_trivia() -> List[Dict[str, Any]]:
+
     import html
 
     url = (
@@ -662,12 +723,13 @@ def fetch_trivia() -> List[Dict[str, Any]]:
     )
 
     try:
+
         response = requests.get(
             url,
             timeout=REQUEST_TIMEOUT,
             headers={
                 "User-Agent":
-                    "SpaceFactsPipeline/9.1"
+                    "SpaceFactsPipeline/9.2"
             },
         )
 
@@ -675,7 +737,10 @@ def fetch_trivia() -> List[Dict[str, Any]]:
 
         data = response.json()
 
-        if data.get("response_code") != 0:
+        if data.get(
+            "response_code"
+        ) != 0:
+
             return []
 
         results = []
@@ -684,20 +749,27 @@ def fetch_trivia() -> List[Dict[str, Any]]:
             "results",
             [],
         ):
+
             question = html.unescape(
                 clean_text(
-                    item.get("question")
+                    item.get(
+                        "question"
+                    )
                 )
             )
 
             answer = html.unescape(
                 clean_text(
-                    item.get("correct_answer")
+                    item.get(
+                        "correct_answer"
+                    )
                 )
             )
 
             category = clean_text(
-                item.get("category")
+                item.get(
+                    "category"
+                )
             )
 
             if not question:
@@ -717,9 +789,11 @@ def fetch_trivia() -> List[Dict[str, Any]]:
         return results
 
     except Exception as exc:
+
         log(
             f"Trivia request failed: {exc}"
         )
+
         return []
 
 
@@ -728,6 +802,7 @@ def fetch_trivia() -> List[Dict[str, Any]]:
 # ============================================================
 
 def weighted_content_type() -> str:
+
     choices = list(
         CONTENT_WEIGHTS.keys()
     )
@@ -780,15 +855,19 @@ def build_candidates(
     candidates = []
 
     for item in on_this_day:
+
         if item["source_id"] not in used_sources:
             candidates.append(item)
 
     for item in trivia:
+
         if item["source_id"] not in used_sources:
             candidates.append(item)
 
     for item in evergreen:
+
         if item["key"] not in used_topics:
+
             candidates.append(
                 {
                     "key": item["key"],
@@ -799,9 +878,9 @@ def build_candidates(
                 }
             )
 
-    # If a lane is exhausted, allow old candidates
-    # rather than failing the entire pipeline.
+    # If a lane is exhausted, allow old candidates.
     if len(candidates) < 5:
+
         for item in on_this_day:
             candidates.append(item)
 
@@ -809,6 +888,7 @@ def build_candidates(
             candidates.append(item)
 
         for item in evergreen:
+
             candidates.append(
                 {
                     "key": item["key"],
@@ -825,6 +905,7 @@ def build_candidates(
     seen = set()
 
     for candidate in candidates:
+
         source_id = candidate.get(
             "source_id",
             "",
@@ -886,7 +967,12 @@ CANDIDATES:
 """
 
 
+# ============================================================
+# GEMINI
+# ============================================================
+
 def get_gemini_client():
+
     from google import genai
 
     return genai.Client(
@@ -894,129 +980,280 @@ def get_gemini_client():
     )
 
 
-def discover_gemini_model(
+def discover_gemini_models(
     client,
-) -> str:
+) -> List[str]:
+    """
+    Discover available Gemini models while preserving
+    our preferred fallback order.
 
-    preferred = [
-        "gemini-3.8-flash",
-        "gemini-3.7-flash",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-    ]
+    If model discovery fails, return the configured list.
+    """
+
+    discovered = []
 
     try:
-        available = []
 
         for model in client.models.list():
-            name = getattr(
-                model,
-                "name",
-                "",
+
+            name = clean_text(
+                getattr(
+                    model,
+                    "name",
+                    "",
+                )
             )
 
-            if name:
-                available.append(name)
+            if not name:
+                continue
 
-        for wanted in preferred:
-            for available_name in available:
-                if wanted in available_name:
-                    log(
-                        f"Using Gemini model: "
-                        f"{available_name}"
-                    )
-                    return available_name
+            # Remove the optional "models/" prefix.
+            normalized = name
+
+            if normalized.startswith(
+                "models/"
+            ):
+
+                normalized = normalized[
+                    len("models/"):
+                ]
+
+            # Only use models that appear in our
+            # explicit preferred list.
+            for preferred in GEMINI_MODELS:
+
+                if normalized == preferred:
+
+                    if preferred not in discovered:
+                        discovered.append(
+                            preferred
+                        )
+
+                    break
 
     except Exception as exc:
+
         log(
             f"Could not discover Gemini models: "
             f"{exc}"
         )
 
-    return "gemini-2.5-flash"
+    # If discovery returned useful results, preserve
+    # our preferred order.
+    if discovered:
+
+        ordered = [
+            model
+            for model in GEMINI_MODELS
+            if model in discovered
+        ]
+
+        if ordered:
+            return ordered
+
+    # Fallback if the model listing endpoint is
+    # temporarily unavailable.
+    return list(GEMINI_MODELS)
+
+
+def is_service_unavailable(
+    error_text: str,
+) -> bool:
+
+    upper = error_text.upper()
+
+    return (
+        "503" in upper
+        or "UNAVAILABLE" in upper
+        or "SERVICE UNAVAILABLE" in upper
+    )
+
+
+def is_quota_or_rate_limit(
+    error_text: str,
+) -> bool:
+
+    upper = error_text.upper()
+
+    return (
+        "429" in upper
+        or "RESOURCE_EXHAUSTED" in upper
+        or "QUOTA" in upper
+        or "RATE LIMIT" in upper
+        or "RATE_LIMIT" in upper
+    )
 
 
 def gemini_generate(
     client,
-    model: str,
+    models: List[str],
     prompt: str,
-    retries: int = 3,
+    retries_per_model: int = 2,
 ) -> str:
+    """
+    Generate text with automatic Gemini model fallback.
 
-    for attempt in range(
-        1,
-        retries + 1,
+    503:
+        Immediately switch to the next model.
+
+    429 / quota:
+        Immediately switch to the next model.
+
+    Other errors:
+        Retry the current model once, then switch.
+
+    This prevents a temporarily overloaded model from
+    killing the entire pipeline.
+    """
+
+    if not models:
+        raise RuntimeError(
+            "No Gemini models configured."
+        )
+
+    last_error = None
+
+    for model_index, model_name in enumerate(
+        models,
+        start=1,
     ):
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-            )
 
-            text = getattr(
-                response,
-                "text",
-                None,
-            )
+        log(
+            f"Trying Gemini model "
+            f"{model_index}/{len(models)}: "
+            f"{model_name}"
+        )
 
-            if text:
-                return text.strip()
+        for attempt in range(
+            1,
+            retries_per_model + 1,
+        ):
 
-            raise RuntimeError(
-                "Gemini returned empty text."
-            )
+            try:
 
-        except Exception as exc:
-            error_text = str(exc)
-
-            log(
-                f"Gemini attempt "
-                f"{attempt}/{retries} failed: "
-                f"{error_text[:400]}"
-            )
-
-            is_quota_error = (
-                "429" in error_text
-                or "RESOURCE_EXHAUSTED"
-                in error_text
-                or "quota"
-                in error_text.lower()
-            )
-
-            if attempt >= retries:
-                raise
-
-            if is_quota_error:
-                time.sleep(
-                    6 * attempt
-                )
-            else:
-                time.sleep(
-                    3 * attempt
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
                 )
 
+                text = getattr(
+                    response,
+                    "text",
+                    None,
+                )
+
+                if text:
+
+                    log(
+                        f"Gemini succeeded with "
+                        f"{model_name}"
+                    )
+
+                    return text.strip()
+
+                raise RuntimeError(
+                    "Gemini returned empty text."
+                )
+
+            except Exception as exc:
+
+                last_error = exc
+
+                error_text = str(exc)
+
+                log(
+                    f"Gemini {model_name} "
+                    f"attempt "
+                    f"{attempt}/{retries_per_model} "
+                    f"failed: "
+                    f"{error_text[:500]}"
+                )
+
+                # ------------------------------------------------
+                # 503 = model temporarily unavailable
+                # ------------------------------------------------
+
+                if is_service_unavailable(
+                    error_text
+                ):
+
+                    log(
+                        f"{model_name} is temporarily "
+                        f"unavailable. Switching to "
+                        f"next Gemini model..."
+                    )
+
+                    break
+
+                # ------------------------------------------------
+                # 429 / quota = switch model
+                # ------------------------------------------------
+
+                if is_quota_or_rate_limit(
+                    error_text
+                ):
+
+                    log(
+                        f"{model_name} hit a rate/quota "
+                        f"limit. Switching to next "
+                        f"Gemini model..."
+                    )
+
+                    break
+
+                # ------------------------------------------------
+                # Other errors
+                # ------------------------------------------------
+
+                if attempt < retries_per_model:
+
+                    wait_time = 3 * attempt
+
+                    log(
+                        f"Retrying {model_name} "
+                        f"in {wait_time}s..."
+                    )
+
+                    time.sleep(
+                        wait_time
+                    )
+
+        log(
+            f"Moving to next Gemini model..."
+        )
+
+    raise RuntimeError(
+        "All Gemini models failed. "
+        f"Last error: {last_error}"
+    )
+
+
+# ============================================================
+# TOPIC SELECTION
+# ============================================================
 
 def select_topic(
     candidates: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
 
     if not candidates:
+
         raise RuntimeError(
             "No topic candidates available."
         )
 
     client = get_gemini_client()
-    model = discover_gemini_model(client)
+
+    models = discover_gemini_models(
+        client
+    )
 
     formatted = []
 
     for index, candidate in enumerate(
         candidates
     ):
+
         formatted.append(
             {
                 "index": index,
@@ -1034,20 +1271,23 @@ def select_topic(
 
     raw = gemini_generate(
         client,
-        model,
+        models,
         prompt,
     )
 
     result = safe_json_loads(raw)
 
     try:
+
         index = int(
             result.get(
                 "selected_index",
                 0,
             )
         )
+
     except Exception:
+
         index = 0
 
     index = max(
@@ -1217,7 +1457,10 @@ def generate_script(
 ) -> Dict[str, Any]:
 
     client = get_gemini_client()
-    model = discover_gemini_model(client)
+
+    models = discover_gemini_models(
+        client
+    )
 
     prompt = SCRIPT_PROMPT.format(
         topic=topic_data.get(
@@ -1240,7 +1483,7 @@ def generate_script(
 
     raw = gemini_generate(
         client,
-        model,
+        models,
         prompt,
     )
 
@@ -1263,7 +1506,9 @@ def validate_script(
     ]
 
     for key in required:
+
         if key not in script:
+
             raise ValueError(
                 f"Script missing: {key}"
             )
@@ -1273,11 +1518,13 @@ def validate_script(
     )
 
     if not title:
+
         raise ValueError(
             "Empty title."
         )
 
     if len(title) > 60:
+
         script["title"] = (
             title[:57] + "..."
         )
@@ -1291,11 +1538,13 @@ def validate_script(
         scenes,
         list,
     ):
+
         raise ValueError(
             "Scenes must be a list."
         )
 
     if not scenes:
+
         raise ValueError(
             "No scenes generated."
         )
@@ -1312,6 +1561,7 @@ def validate_script(
     ).lower()
 
     if footage_style not in FOOTAGE_STYLES:
+
         footage_style = "general"
 
     script["footage_style"] = footage_style
@@ -1325,6 +1575,7 @@ def validate_script(
         queries,
         list,
     ):
+
         queries = []
 
     queries = [
@@ -1334,17 +1585,24 @@ def validate_script(
     ]
 
     if not queries:
+
         queries = [
             footage_style,
             "interesting footage",
             "cinematic b roll",
         ]
 
-    script["visual_search_queries"] = queries[:5]
+    script["visual_search_queries"] = queries[
+        :5
+    ]
 
     for scene in script["scenes"]:
 
-        if not isinstance(scene, dict):
+        if not isinstance(
+            scene,
+            dict,
+        ):
+
             raise ValueError(
                 "Invalid scene object."
             )
@@ -1364,18 +1622,23 @@ def validate_script(
         )
 
         if not narration:
+
             raise ValueError(
                 "Scene has empty narration."
             )
 
         if not caption:
+
             caption = " ".join(
                 narration.split()[:4]
             )
 
         caption = caption.upper()
 
-        if len(caption.split()) > 6:
+        if len(
+            caption.split()
+        ) > 6:
+
             caption = " ".join(
                 caption.split()[:6]
             )
@@ -1392,6 +1655,7 @@ def validate_script(
         hashtags,
         list,
     ):
+
         hashtags = []
 
     hashtags = [
@@ -1406,12 +1670,15 @@ def validate_script(
     ]
 
     if "#shorts" not in existing:
+
         hashtags.insert(
             0,
             "#shorts",
         )
 
-    script["hashtags"] = hashtags[:8]
+    script["hashtags"] = hashtags[
+        :8
+    ]
 
     ending_style = clean_text(
         script.get(
@@ -1425,6 +1692,7 @@ def validate_script(
         "question",
         "punchline",
     }:
+
         ending_style = "loop"
 
     script["ending_style"] = ending_style
@@ -1439,7 +1707,9 @@ def total_narration_words(
         for scene in script["scenes"]
     )
 
-    return len(text.split())
+    return len(
+        text.split()
+    )
 
 
 # ============================================================
@@ -1455,6 +1725,7 @@ def synthesize_scene_audio(
     import edge_tts
 
     async def generate():
+
         communicate = edge_tts.Communicate(
             narration,
             TTS_VOICE,
@@ -1466,7 +1737,9 @@ def synthesize_scene_audio(
             str(output_path)
         )
 
-    asyncio.run(generate())
+    asyncio.run(
+        generate()
+    )
 
 
 def synthesize_all_audio(
@@ -1475,6 +1748,7 @@ def synthesize_all_audio(
 ) -> Tuple[List[Path], float]:
 
     audio_dir = run_dir / "audio"
+
     audio_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -1484,7 +1758,9 @@ def synthesize_all_audio(
 
     scenes = script["scenes"]
 
-    for index, scene in enumerate(scenes):
+    for index, scene in enumerate(
+        scenes
+    ):
 
         path = (
             audio_dir
@@ -1506,7 +1782,9 @@ def synthesize_all_audio(
     clips = []
 
     try:
+
         for path in paths:
+
             clips.append(
                 AudioFileClip(
                     str(path)
@@ -1519,7 +1797,9 @@ def synthesize_all_audio(
         )
 
     finally:
+
         for clip in clips:
+
             try:
                 clip.close()
             except Exception:
@@ -1531,24 +1811,33 @@ def synthesize_all_audio(
 def concatenate_audio(
     clips: List[AudioFileClip],
 ):
+
     if not clips:
+
         raise RuntimeError(
             "No audio clips."
         )
 
     if len(clips) == 1:
+
         return clips[0]
 
     current_time = 0.0
     pieces = []
 
     for clip in clips:
+
         pieces.append(
-            clip.set_start(current_time)
+            clip.set_start(
+                current_time
+            )
         )
+
         current_time += clip.duration
 
-    return CompositeAudioClip(pieces)
+    return CompositeAudioClip(
+        pieces
+    )
 
 
 # ============================================================
@@ -1556,11 +1845,12 @@ def concatenate_audio(
 # ============================================================
 
 def coverr_headers() -> Dict[str, str]:
+
     return {
         "x-api-key": COVERR_API_KEY,
         "Accept": "application/json",
         "User-Agent":
-            "SpaceFactsPipeline/9.1",
+            "SpaceFactsPipeline/9.2",
     }
 
 
@@ -1583,6 +1873,7 @@ def search_coverr_videos(
     }
 
     try:
+
         response = requests.get(
             COVERR_API_URL,
             params=params,
@@ -1591,16 +1882,20 @@ def search_coverr_videos(
         )
 
         if response.status_code == 401:
+
             log(
                 "Coverr authentication failed. "
                 "Check COVERR_API_KEY."
             )
+
             return []
 
         if response.status_code == 429:
+
             log(
                 "Coverr rate limit reached."
             )
+
             return []
 
         response.raise_for_status()
@@ -1616,15 +1911,18 @@ def search_coverr_videos(
             hits,
             list,
         ):
+
             return []
 
         return hits
 
     except Exception as exc:
+
         log(
             f"Coverr search failed for "
             f"'{query}': {exc}"
         )
+
         return []
 
 
@@ -1641,6 +1939,7 @@ def get_coverr_video_details(
     )
 
     try:
+
         response = requests.get(
             url,
             headers=coverr_headers(),
@@ -1656,17 +1955,20 @@ def get_coverr_video_details(
             data,
             dict,
         ):
+
             return {}
 
         if isinstance(
             data.get("video"),
             dict,
         ):
+
             return data["video"]
 
         return data
 
     except Exception as exc:
+
         log(
             f"Coverr detail lookup failed: "
             f"{exc}"
@@ -1685,12 +1987,14 @@ def recursive_urls(
         value,
         str,
     ):
+
         lower = value.lower()
 
         if (
             lower.startswith("http://")
             or lower.startswith("https://")
         ):
+
             found.append(value)
 
         return found
@@ -1699,11 +2003,13 @@ def recursive_urls(
         value,
         dict,
     ):
+
         for key, child in value.items():
 
             if "thumbnail" in str(
                 key
             ).lower():
+
                 continue
 
             found.extend(
@@ -1716,7 +2022,9 @@ def recursive_urls(
         value,
         list,
     ):
+
         for child in value:
+
             found.extend(
                 recursive_urls(child)
             )
@@ -1747,6 +2055,7 @@ def choose_media_url(
             obj,
             dict,
         ):
+
             for key in preferred_keys:
 
                 value = obj.get(key)
@@ -1755,6 +2064,7 @@ def choose_media_url(
                     value,
                     str,
                 ):
+
                     continue
 
                 low = value.lower()
@@ -1763,6 +2073,7 @@ def choose_media_url(
                     low.startswith("http://")
                     or low.startswith("https://")
                 ):
+
                     continue
 
                 if (
@@ -1773,10 +2084,14 @@ def choose_media_url(
                     or "cdn" in low
                     or "download" in low
                 ):
+
                     return value
 
             for child in obj.values():
-                result = search_dict(child)
+
+                result = search_dict(
+                    child
+                )
 
                 if result:
                     return result
@@ -1785,8 +2100,12 @@ def choose_media_url(
             obj,
             list,
         ):
+
             for child in obj:
-                result = search_dict(child)
+
+                result = search_dict(
+                    child
+                )
 
                 if result:
                     return result
@@ -1798,9 +2117,12 @@ def choose_media_url(
     if result:
         return result
 
-    urls = recursive_urls(video)
+    urls = recursive_urls(
+        video
+    )
 
     for url in urls:
+
         lower = url.lower()
 
         if (
@@ -1810,6 +2132,7 @@ def choose_media_url(
             or "video" in lower
             or "download" in lower
         ):
+
             return url
 
     return None
@@ -1819,7 +2142,9 @@ def get_coverr_video_url(
     video: Dict[str, Any],
 ) -> Optional[str]:
 
-    direct = choose_media_url(video)
+    direct = choose_media_url(
+        video
+    )
 
     if direct:
         return direct
@@ -1839,6 +2164,7 @@ def get_coverr_video_url(
     )
 
     if details:
+
         return choose_media_url(
             details
         )
@@ -1860,7 +2186,9 @@ def download_coverr_video(
     if not video_id:
         return None
 
-    safe_id = slugify(video_id)
+    safe_id = slugify(
+        video_id
+    )
 
     output_path = (
         COVERR_DOWNLOAD_DIR
@@ -1871,20 +2199,26 @@ def download_coverr_video(
         output_path.exists()
         and output_path.stat().st_size > 100_000
     ):
+
         log(
             f"Using cached Coverr clip: "
             f"{output_path.name}"
         )
+
         return output_path
 
-    url = get_coverr_video_url(video)
+    url = get_coverr_video_url(
+        video
+    )
 
     if not url:
+
         log(
             f"No downloadable media URL "
             f"found for Coverr video "
             f"{video_id}"
         )
+
         return None
 
     temp_path = output_path.with_suffix(
@@ -1892,6 +2226,7 @@ def download_coverr_video(
     )
 
     try:
+
         log(
             f"Downloading Coverr clip: "
             f"{video.get('title', video_id)}"
@@ -1901,7 +2236,7 @@ def download_coverr_video(
             url,
             headers={
                 "User-Agent":
-                    "SpaceFactsPipeline/9.1"
+                    "SpaceFactsPipeline/9.2"
             },
             stream=True,
             timeout=REQUEST_TIMEOUT,
@@ -1917,6 +2252,7 @@ def download_coverr_video(
                 for chunk in response.iter_content(
                     chunk_size=1024 * 1024
                 ):
+
                     if chunk:
                         file.write(chunk)
 
@@ -1924,11 +2260,14 @@ def download_coverr_video(
             not temp_path.exists()
             or temp_path.stat().st_size < 100_000
         ):
+
             raise RuntimeError(
                 "Downloaded file is too small."
             )
 
-        temp_path.replace(output_path)
+        temp_path.replace(
+            output_path
+        )
 
         return output_path
 
@@ -1940,9 +2279,11 @@ def download_coverr_video(
         )
 
         try:
+
             temp_path.unlink(
                 missing_ok=True
             )
+
         except Exception:
             pass
 
@@ -1987,7 +2328,9 @@ def select_coverr_clips(
             limit=10,
         )
 
-        random.shuffle(results)
+        random.shuffle(
+            results
+        )
 
         for video in results:
 
@@ -2011,17 +2354,23 @@ def select_coverr_clips(
             if video_id in seen_ids:
                 continue
 
-            seen_ids.add(video_id)
+            seen_ids.add(
+                video_id
+            )
 
-            item = dict(video)
+            item = dict(
+                video
+            )
+
             item["_query"] = query
 
-            candidates.append(item)
+            candidates.append(
+                item
+            )
 
     if not candidates:
         return []
 
-    # Prefer vertical footage when Coverr provides it.
     vertical = [
         item
         for item in candidates
@@ -2046,7 +2395,10 @@ def select_coverr_clips(
 
     for candidate in ordered:
 
-        if len(selected) >= number_of_clips:
+        if len(
+            selected
+        ) >= number_of_clips:
+
             break
 
         path = download_coverr_video(
@@ -2133,6 +2485,7 @@ def detect_footage_style(
     lower = str(path).lower()
 
     for style in FOOTAGE_STYLES:
+
         if style in lower:
             return style
 
@@ -2153,7 +2506,8 @@ def select_local_footage(
     preferred = [
         path
         for path in files
-        if detect_footage_style(path) == style
+        if detect_footage_style(path)
+        == style
     ]
 
     general = [
@@ -2171,13 +2525,18 @@ def select_local_footage(
         )
     )
 
-    random.shuffle(pool)
+    random.shuffle(
+        pool
+    )
 
     selected = []
 
     for path in pool:
 
-        if len(selected) >= number_of_clips:
+        if len(
+            selected
+        ) >= number_of_clips:
+
             break
 
         path_str = str(path)
@@ -2196,13 +2555,12 @@ def select_local_footage(
             }
         )
 
-    # If everything was previously used,
-    # allow reuse rather than failing.
     if not selected and pool:
 
         for path in pool[
             :number_of_clips
         ]:
+
             selected.append(
                 {
                     "path": str(path),
@@ -2229,6 +2587,7 @@ def select_footage(
     )
 
     if not queries:
+
         queries = [
             style,
             "cinematic footage",
@@ -2248,10 +2607,14 @@ def select_footage(
         number_of_clips,
     )
 
-    if len(clips) >= number_of_clips:
+    if len(
+        clips
+    ) >= number_of_clips:
+
         log(
             f"Found {len(clips)} Coverr clips."
         )
+
         return clips
 
     log(
@@ -2276,6 +2639,7 @@ def select_footage(
 def crop_to_vertical(
     clip: VideoFileClip,
 ):
+
     width = clip.w
     height = clip.h
 
@@ -2295,7 +2659,8 @@ def crop_to_vertical(
         x1 = max(
             0,
             int(
-                (width - new_width) / 2
+                (width - new_width)
+                / 2
             ),
         )
 
@@ -2311,7 +2676,8 @@ def crop_to_vertical(
     y1 = max(
         0,
         int(
-            (height - new_height) / 2
+            (height - new_height)
+            / 2
         ),
     )
 
@@ -2325,10 +2691,15 @@ def prepare_footage_clip(
     path: str,
     duration: float,
 ):
-    clip = VideoFileClip(path)
+
+    clip = VideoFileClip(
+        path
+    )
 
     if clip.duration <= 0:
+
         clip.close()
+
         raise RuntimeError(
             f"Invalid video duration: {path}"
         )
@@ -2356,8 +2727,6 @@ def prepare_footage_clip(
 
     else:
 
-        # Make independent copies instead of reusing
-        # the exact same MoviePy clip object.
         repeats = (
             int(
                 duration / clip.duration
@@ -2377,6 +2746,11 @@ def prepare_footage_clip(
             0,
             duration,
         )
+
+        try:
+            clip.close()
+        except Exception:
+            pass
 
     prepared = crop_to_vertical(
         prepared
@@ -2401,6 +2775,7 @@ def prepare_footage_clip(
 def get_caption_font(
     size: int = 82,
 ):
+
     return ImageFont.truetype(
         CAPTION_FONT_PATH,
         size=size,
@@ -2428,7 +2803,9 @@ def make_caption_image(
         ),
     )
 
-    draw = ImageDraw.Draw(image)
+    draw = ImageDraw.Draw(
+        image
+    )
 
     font = get_caption_font(
         font_size
@@ -2454,17 +2831,26 @@ def make_caption_image(
             stroke_width=5,
         )
 
-        if bbox[2] - bbox[0] <= width - 50:
+        if (
+            bbox[2] - bbox[0]
+            <= width - 50
+        ):
+
             current = test
+
         else:
 
             if current:
-                lines.append(current)
+                lines.append(
+                    current
+                )
 
             current = word
 
     if current:
-        lines.append(current)
+        lines.append(
+            current
+        )
 
     lines = lines[:3]
 
@@ -2495,7 +2881,9 @@ def make_caption_image(
         height - total_height
     ) / 2
 
-    for index, line in enumerate(lines):
+    for index, line in enumerate(
+        lines
+    ):
 
         bbox = draw.textbbox(
             (0, 0),
@@ -2556,8 +2944,13 @@ def save_caption_images(
             / f"caption_{index:02d}.png"
         )
 
-        image.save(path)
-        paths.append(path)
+        image.save(
+            path
+        )
+
+        paths.append(
+            path
+        )
 
     return paths
 
@@ -2588,7 +2981,9 @@ def find_bgm() -> Optional[Path]:
     if not files:
         return None
 
-    return random.choice(files)
+    return random.choice(
+        files
+    )
 
 
 # ============================================================
@@ -2609,16 +3004,12 @@ def build_video(
 
     scenes = script["scenes"]
 
-    # Use the actual narration duration.
-    # Normal 85–115 word scripts should naturally land
-    # inside the 30–45 second target.
     final_duration = clamp(
         total_duration,
         TARGET_MIN_SECONDS,
         TARGET_MAX_SECONDS,
     )
 
-    # Scene duration weights based on narration word count.
     weights = [
         max(
             len(
@@ -2629,7 +3020,9 @@ def build_video(
         for scene in scenes
     ]
 
-    total_weight = sum(weights)
+    total_weight = sum(
+        weights
+    )
 
     scene_durations = [
         final_duration
@@ -2640,6 +3033,7 @@ def build_video(
     ]
 
     if not footage_items:
+
         raise RuntimeError(
             "No footage available."
         )
@@ -2647,6 +3041,7 @@ def build_video(
     prepared_clips = []
     narration_clips = []
     caption_layers = []
+
     background = None
     narration = None
     final_video = None
@@ -2656,7 +3051,7 @@ def build_video(
     try:
 
         # ----------------------------------------------------
-        # PREPARE MULTIPLE FOOTAGE CLIPS
+        # FOOTAGE
         # ----------------------------------------------------
 
         for index, duration in enumerate(
@@ -2664,12 +3059,14 @@ def build_video(
         ):
 
             footage = footage_items[
-                index % len(footage_items)
+                index
+                % len(footage_items)
             ]
 
             log(
                 f"Preparing footage "
-                f"{index + 1}/{len(scenes)}: "
+                f"{index + 1}/"
+                f"{len(scenes)}: "
                 f"{footage.get('title', '')}"
             )
 
@@ -2678,7 +3075,9 @@ def build_video(
                 duration,
             )
 
-            prepared_clips.append(clip)
+            prepared_clips.append(
+                clip
+            )
 
         background = concatenate_videoclips(
             prepared_clips,
@@ -2747,7 +3146,7 @@ def build_video(
             current_time += duration
 
         # ----------------------------------------------------
-        # COMPOSITE VIDEO
+        # COMPOSITE
         # ----------------------------------------------------
 
         final_video = CompositeVideoClip(
@@ -2857,7 +3256,8 @@ def build_video(
         )
 
         log(
-            f"Rendering {final_duration:.2f}s video..."
+            f"Rendering "
+            f"{final_duration:.2f}s video..."
         )
 
         final_video.write_videofile(
@@ -2874,8 +3274,10 @@ def build_video(
 
         if (
             not output_path.exists()
-            or output_path.stat().st_size < 100_000
+            or output_path.stat().st_size
+            < 100_000
         ):
+
             raise RuntimeError(
                 "Video file was not created correctly."
             )
@@ -2884,7 +3286,6 @@ def build_video(
 
     finally:
 
-        # Close composite first.
         for obj in [
             final_video,
             final_audio,
@@ -2892,25 +3293,31 @@ def build_video(
             bgm,
             background,
         ]:
+
             try:
+
                 if obj:
                     obj.close()
+
             except Exception:
                 pass
 
         for clip in narration_clips:
+
             try:
                 clip.close()
             except Exception:
                 pass
 
         for clip in caption_layers:
+
             try:
                 clip.close()
             except Exception:
                 pass
 
         for clip in prepared_clips:
+
             try:
                 clip.close()
             except Exception:
@@ -2947,7 +3354,9 @@ def build_description(
     coverr_items = [
         item
         for item in footage_items
-        if item.get("provider") == "Coverr"
+        if item.get(
+            "provider"
+        ) == "Coverr"
     ]
 
     if coverr_items:
@@ -3021,10 +3430,14 @@ def upload_to_youtube(
         ).strip()
 
         if tag:
-            tags.append(tag)
+            tags.append(
+                tag
+            )
 
     return upload_video(
-        video_path=str(video_path),
+        video_path=str(
+            video_path
+        ),
         title=title,
         description=description,
         tags=tags,
@@ -3048,7 +3461,9 @@ def log_upload(
         "timestamp": time.strftime(
             "%Y-%m-%dT%H:%M:%S"
         ),
-        "video": str(video_path),
+        "video": str(
+            video_path
+        ),
         "title": script.get(
             "title",
             "",
@@ -3192,11 +3607,13 @@ def run_pipeline() -> None:
     )
 
     log(
-        f"Generated {word_count} narration words."
+        f"Generated {word_count} "
+        f"narration words."
     )
 
     log(
-        f"Title: {script.get('title', '')}"
+        f"Title: "
+        f"{script.get('title', '')}"
     )
 
     log(
@@ -3221,7 +3638,10 @@ def run_pipeline() -> None:
         + uuid.uuid4().hex[:6]
     )
 
-    run_dir = OUTPUT_DIR / run_id
+    run_dir = (
+        OUTPUT_DIR
+        / run_id
+    )
 
     run_dir.mkdir(
         parents=True,
@@ -3236,9 +3656,11 @@ def run_pipeline() -> None:
         script["scenes"]
     )
 
-    # 3–5 unique clips per Short.
     number_of_clips = min(
-        max(scene_count, 3),
+        max(
+            scene_count,
+            3,
+        ),
         5,
     )
 
@@ -3256,6 +3678,7 @@ def run_pipeline() -> None:
     )
 
     if not footage_items:
+
         raise RuntimeError(
             "No footage could be obtained."
         )
@@ -3311,7 +3734,8 @@ def run_pipeline() -> None:
     )
 
     log(
-        f"Video created: {video_path}"
+        f"Video created: "
+        f"{video_path}"
     )
 
     # --------------------------------------------------------
@@ -3351,6 +3775,7 @@ def run_pipeline() -> None:
     )
 
     if source_id:
+
         remember_source(
             state,
             source_id,
@@ -3365,6 +3790,7 @@ def run_pipeline() -> None:
     )
 
     if topic_key:
+
         remember_topic(
             state,
             topic_key,
@@ -3388,12 +3814,15 @@ def run_pipeline() -> None:
         )
 
         if footage_source:
+
             remember_source(
                 state,
                 footage_source,
             )
 
-    save_state(state)
+    save_state(
+        state
+    )
 
     # --------------------------------------------------------
     # LOG
@@ -3411,13 +3840,16 @@ def run_pipeline() -> None:
     print("=" * 70)
     print("UPLOAD SUCCESSFUL")
     print(
-        f"Title: {script.get('title', '')}"
+        f"Title: "
+        f"{script.get('title', '')}"
     )
     print(
-        f"Duration: {final_duration:.2f}s"
+        f"Duration: "
+        f"{final_duration:.2f}s"
     )
     print(
-        f"Footage clips: {len(footage_items)}"
+        f"Footage clips: "
+        f"{len(footage_items)}"
     )
     print("=" * 70)
     print()
@@ -3430,6 +3862,7 @@ def run_pipeline() -> None:
 if __name__ == "__main__":
 
     try:
+
         run_pipeline()
 
     except KeyboardInterrupt:
