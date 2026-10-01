@@ -1,42 +1,52 @@
 """
-SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v7)
+SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v8)
 
 FORMAT:
-    Minecraft / Roblox / satisfying gameplay
+    Random interesting footage
     +
-    Interesting history / trivia narration
+    Interesting history / trivia / science narration
     +
     Dynamic captions
+    +
+    Consistent male narrator
 
 PIPELINE:
-1. Fetch fresh "On This Day" historical events and/or trivia
-2. Select a strong topic with Gemini
-3. Generate a 30–45 second story
-4. Generate narration with Edge TTS
-5. Select gameplay footage from gameplay/
-6. Crop gameplay to 1080x1920
-7. Add dynamic captions
-8. Assemble the Short
-9. Upload to YouTube
+1. Fetch fresh On This Day events / trivia
+2. Mix in broader evergreen topics
+3. Select a strong topic with Gemini
+4. Generate a 30–45 second story
+5. Generate narration with Edge TTS
+6. Select matching random footage
+7. Crop footage to 1080x1920
+8. Add dynamic captions
+9. Assemble the Short
+10. Upload to YouTube
 
-GAMEPLAY FOLDER:
+FOOTAGE FOLDER:
+
+footage/
+├── construction/
+├── machines/
+├── cars/
+├── nature/
+├── satisfying/
+├── sports/
+├── animation/
+├── ocean/
+├── aviation/
+└── general/
+
+Supported:
+.mp4
+.mov
+.webm
+.mkv
+
+BACKWARD COMPATIBILITY:
+
+If footage/ does not exist, the program will also check:
 
 gameplay/
-├── minecraft/
-│   ├── build01.mp4
-│   ├── build02.mp4
-│   └── gameplay01.mp4
-│
-├── roblox/
-│   ├── build01.mp4
-│   └── gameplay01.mp4
-│
-└── satisfying/
-    ├── parkour01.mp4
-    └── build01.mp4
-
-The pipeline recursively searches gameplay/ for:
-.mp4, .mov, .webm, .mkv
 
 Existing infrastructure:
 - Gemini
@@ -91,6 +101,17 @@ OUTPUT_DIR.mkdir(
     exist_ok=True
 )
 
+
+# New footage directory.
+FOOTAGE_DIR = Path(
+    os.environ.get(
+        "FOOTAGE_DIR",
+        "footage",
+    )
+)
+
+
+# Old directory retained for compatibility.
 GAMEPLAY_DIR = Path(
     os.environ.get(
         "GAMEPLAY_DIR",
@@ -98,13 +119,16 @@ GAMEPLAY_DIR = Path(
     )
 )
 
+
 VIDEO_W = 1080
 VIDEO_H = 1920
+
 
 CAPTION_FONT_PATH = str(
     Path(__file__).parent
     / "Anton-Regular.ttf"
 )
+
 
 BGM_DIR = Path(
     os.environ.get(
@@ -112,6 +136,16 @@ BGM_DIR = Path(
         "bgm",
     )
 )
+
+
+# ==================================================================
+# STANDARD MALE VOICE
+# ==================================================================
+
+# One voice for the entire channel.
+#
+# This is intentionally NOT randomized.
+TTS_VOICE = "en-US-AndrewMultilingualNeural"
 
 
 # ==================================================================
@@ -135,62 +169,417 @@ GEMINI_MODELS = [
 # ==================================================================
 
 CONTENT_WEIGHTS = {
-    "on_this_day": 0.70,
-    "trivia": 0.30,
+    "on_this_day": 0.45,
+    "trivia": 0.25,
+    "evergreen": 0.30,
 }
 
 
 # ==================================================================
-# TEXT TO SPEECH
+# FOOTAGE STYLES
 # ==================================================================
 
-TTS_VOICES = [
-    "en-GB-RyanNeural",
-    "en-US-EmmaMultilingualNeural",
-    "en-US-AndrewMultilingualNeural",
-    "en-US-AvaMultilingualNeural",
+FOOTAGE_STYLES = [
+    "construction",
+    "machines",
+    "cars",
+    "nature",
+    "satisfying",
+    "sports",
+    "animation",
+    "ocean",
+    "aviation",
+    "general",
 ]
 
 
 # ==================================================================
-# FALLBACK TOPICS
+# EVERGREEN TOPICS
 # ==================================================================
 
-FALLBACK_TOPICS = [
+EVERGREEN_TOPICS = [
+
+    # --------------------------------------------------------------
+    # HISTORY
+    # --------------------------------------------------------------
+
     {
         "topic": (
-            "why the pyramids still stand "
-            "after thousands of years"
+            "how the pyramids were built "
+            "without modern machinery"
         ),
         "category": "history",
     },
+
     {
         "topic": (
-            "how ancient Roman concrete "
-            "could repair itself"
+            "how Roman concrete survived "
+            "for thousands of years"
         ),
         "category": "history",
     },
+
     {
         "topic": (
-            "why the Antikythera mechanism "
-            "was so advanced"
+            "the mysterious Antikythera mechanism"
         ),
         "category": "history",
     },
+
     {
         "topic": (
             "why the Voynich manuscript "
-            "remains undecoded"
+            "is still so mysterious"
         ),
         "category": "history",
     },
+
     {
         "topic": (
-            "why astronauts experience "
-            "slightly different aging"
+            "the ancient city of Pompeii "
+            "and its final day"
+        ),
+        "category": "history",
+    },
+
+    {
+        "topic": (
+            "why medieval castles were "
+            "so difficult to attack"
+        ),
+        "category": "history",
+    },
+
+    {
+        "topic": (
+            "how ancient Egyptians "
+            "moved enormous stones"
+        ),
+        "category": "history",
+    },
+
+    {
+        "topic": (
+            "the strange history of the "
+            "first mechanical clocks"
+        ),
+        "category": "history",
+    },
+
+    {
+        "topic": (
+            "why Vikings used surprisingly "
+            "advanced navigation"
+        ),
+        "category": "history",
+    },
+
+    {
+        "topic": (
+            "the ancient city that disappeared "
+            "under the sea"
+        ),
+        "category": "history",
+    },
+
+    # --------------------------------------------------------------
+    # SCIENCE
+    # --------------------------------------------------------------
+
+    {
+        "topic": (
+            "why astronauts age slightly "
+            "differently in space"
         ),
         "category": "science",
+    },
+
+    {
+        "topic": (
+            "why lightning can create glass "
+            "in the ground"
+        ),
+        "category": "science",
+    },
+
+    {
+        "topic": (
+            "why humans cannot hear "
+            "all frequencies of sound"
+        ),
+        "category": "science",
+    },
+
+    {
+        "topic": (
+            "why the sky changes color "
+            "during sunset"
+        ),
+        "category": "science",
+    },
+
+    {
+        "topic": (
+            "why some metals can remember "
+            "their original shape"
+        ),
+        "category": "science",
+    },
+
+    {
+        "topic": (
+            "how octopuses can change "
+            "their appearance"
+        ),
+        "category": "science",
+    },
+
+    {
+        "topic": (
+            "why boiling water can freeze "
+            "under certain conditions"
+        ),
+        "category": "science",
+    },
+
+    {
+        "topic": (
+            "how airplanes stay in the air"
+        ),
+        "category": "science",
+    },
+
+    {
+        "topic": (
+            "why the Moon is slowly "
+            "moving away from Earth"
+        ),
+        "category": "science",
+    },
+
+    {
+        "topic": (
+            "why humans get goosebumps"
+        ),
+        "category": "science",
+    },
+
+    # --------------------------------------------------------------
+    # ENGINEERING
+    # --------------------------------------------------------------
+
+    {
+        "topic": (
+            "how skyscrapers survive "
+            "strong winds"
+        ),
+        "category": "engineering",
+    },
+
+    {
+        "topic": (
+            "how suspension bridges "
+            "support enormous weight"
+        ),
+        "category": "engineering",
+    },
+
+    {
+        "topic": (
+            "how tunnels are built "
+            "under cities"
+        ),
+        "category": "engineering",
+    },
+
+    {
+        "topic": (
+            "how massive cranes can "
+            "lift incredible weights"
+        ),
+        "category": "engineering",
+    },
+
+    {
+        "topic": (
+            "how dams hold back "
+            "millions of tons of water"
+        ),
+        "category": "engineering",
+    },
+
+    {
+        "topic": (
+            "how trains can stop "
+            "such enormous masses"
+        ),
+        "category": "engineering",
+    },
+
+    # --------------------------------------------------------------
+    # MYSTERIES
+    # --------------------------------------------------------------
+
+    {
+        "topic": (
+            "the strange disappearance "
+            "of the Mary Celeste"
+        ),
+        "category": "mystery",
+    },
+
+    {
+        "topic": (
+            "why the Tunguska explosion "
+            "flattened such a huge area"
+        ),
+        "category": "science",
+    },
+
+    {
+        "topic": (
+            "the mystery of the "
+            "Dancing Plague of 1518"
+        ),
+        "category": "history",
+    },
+
+    {
+        "topic": (
+            "why some ancient civilizations "
+            "built enormous stone structures"
+        ),
+        "category": "history",
+    },
+
+    # --------------------------------------------------------------
+    # ANIMALS / NATURE
+    # --------------------------------------------------------------
+
+    {
+        "topic": (
+            "how tardigrades can survive "
+            "extreme conditions"
+        ),
+        "category": "nature",
+    },
+
+    {
+        "topic": (
+            "why sharks are older "
+            "than trees"
+        ),
+        "category": "nature",
+    },
+
+    {
+        "topic": (
+            "how ants can build living bridges"
+        ),
+        "category": "nature",
+    },
+
+    {
+        "topic": (
+            "how birds can navigate "
+            "across enormous distances"
+        ),
+        "category": "nature",
+    },
+
+    {
+        "topic": (
+            "why octopuses have three hearts"
+        ),
+        "category": "nature",
+    },
+
+    # --------------------------------------------------------------
+    # TECHNOLOGY
+    # --------------------------------------------------------------
+
+    {
+        "topic": (
+            "how the first computers "
+            "filled entire rooms"
+        ),
+        "category": "technology",
+    },
+
+    {
+        "topic": (
+            "how GPS can calculate "
+            "your location"
+        ),
+        "category": "technology",
+    },
+
+    {
+        "topic": (
+            "why computer chips are "
+            "so incredibly small"
+        ),
+        "category": "technology",
+    },
+
+    {
+        "topic": (
+            "how hard drives store "
+            "billions of tiny bits"
+        ),
+        "category": "technology",
+    },
+
+    {
+        "topic": (
+            "how satellites communicate "
+            "with Earth"
+        ),
+        "category": "technology",
+    },
+
+    # --------------------------------------------------------------
+    # TRANSPORT
+    # --------------------------------------------------------------
+
+    {
+        "topic": (
+            "why Formula 1 cars "
+            "can corner so quickly"
+        ),
+        "category": "transport",
+    },
+
+    {
+        "topic": (
+            "why modern airplanes "
+            "can fly for so long"
+        ),
+        "category": "transport",
+    },
+
+    {
+        "topic": (
+            "how bullet trains "
+            "reach incredible speeds"
+        ),
+        "category": "transport",
+    },
+
+    {
+        "topic": (
+            "why race cars have "
+            "such unusual shapes"
+        ),
+        "category": "transport",
+    },
+
+    {
+        "topic": (
+            "how ships stay afloat "
+            "despite weighing thousands of tons"
+        ),
+        "category": "transport",
     },
 ]
 
@@ -209,16 +598,21 @@ def validate_environment():
             "GEMINI_API_KEY"
         )
 
-    if not GAMEPLAY_DIR.exists():
+    footage_exists = (
+        FOOTAGE_DIR.exists()
+        or GAMEPLAY_DIR.exists()
+    )
+
+    if not footage_exists:
 
         print(
-            f"WARNING: Gameplay directory "
-            f"does not exist: {GAMEPLAY_DIR}"
+            "WARNING: No footage directory "
+            "was found."
         )
 
         print(
-            "Create gameplay/ and add "
-            "your gameplay videos."
+            "Create footage/ and add "
+            "licensed footage."
         )
 
     if not Path(
@@ -249,11 +643,35 @@ def load_state():
 
         try:
 
-            return json.loads(
+            state = json.loads(
                 STATE_FILE.read_text(
                     encoding="utf-8"
                 )
             )
+
+            # Add new fields if this is
+            # an older state file.
+            state.setdefault(
+                "recent_titles",
+                [],
+            )
+
+            state.setdefault(
+                "used_source_ids",
+                [],
+            )
+
+            state.setdefault(
+                "used_topic_keys",
+                [],
+            )
+
+            state.setdefault(
+                "used_gameplay",
+                [],
+            )
+
+            return state
 
         except Exception as e:
 
@@ -416,6 +834,79 @@ def topic_was_used(
     )
 
 
+def normalize_topic_key(
+    topic
+):
+
+    text = str(
+        topic or ""
+    ).lower().strip()
+
+    text = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        text,
+    )
+
+    return text.strip("-")
+
+
+# ==================================================================
+# FOOTAGE STATE
+# ==================================================================
+
+def get_used_footage():
+
+    state = load_state()
+
+    return [
+        str(x)
+        for x in state.get(
+            "used_gameplay",
+            [],
+        )
+    ]
+
+
+def remember_footage(
+    footage_path
+):
+
+    state = load_state()
+
+    used = state.get(
+        "used_gameplay",
+        [],
+    )
+
+    path_string = str(
+        footage_path
+    )
+
+    used.append(
+        path_string
+    )
+
+    state["used_gameplay"] = (
+        used[-1000:]
+    )
+
+    save_state(
+        state
+    )
+
+
+def reset_used_footage():
+
+    state = load_state()
+
+    state["used_gameplay"] = []
+
+    save_state(
+        state
+    )
+
+
 # ==================================================================
 # UPLOAD LOG
 # ==================================================================
@@ -425,6 +916,8 @@ def log_upload(
     title,
     category,
     ending_style,
+    footage_style,
+    footage_path,
 ):
 
     entry = {
@@ -432,6 +925,10 @@ def log_upload(
         "title": title,
         "category": category,
         "ending_style": ending_style,
+        "footage_style": footage_style,
+        "footage": str(
+            footage_path
+        ),
         "url": (
             f"https://youtu.be/{video_id}"
         ),
@@ -603,7 +1100,6 @@ def is_gemini_retryable_error(
 
 def fetch_on_this_day():
 
-    # Zimbabwe local date.
     today = datetime.now(
         ZoneInfo(
             "Africa/Harare"
@@ -632,7 +1128,7 @@ def fetch_on_this_day():
             url,
             headers={
                 "User-Agent":
-                    "SpaceFactsPipeline/7.0"
+                    "SpaceFactsPipeline/8.0"
             },
             timeout=20,
         )
@@ -781,7 +1277,7 @@ def fetch_trivia():
     )
 
     params = {
-        "amount": 20,
+        "amount": 30,
         "type": "multiple",
     }
 
@@ -877,6 +1373,58 @@ def fetch_trivia():
         )
 
         return []
+
+
+# ==================================================================
+# EVERGREEN CANDIDATES
+# ==================================================================
+
+def get_evergreen_candidates():
+
+    candidates = []
+
+    shuffled = (
+        EVERGREEN_TOPICS.copy()
+    )
+
+    random.shuffle(
+        shuffled
+    )
+
+    for item in shuffled:
+
+        topic_key = (
+            normalize_topic_key(
+                item["topic"]
+            )
+        )
+
+        if topic_was_used(
+            topic_key
+        ):
+
+            continue
+
+        candidates.append(
+            {
+                "source": "Evergreen",
+                "source_id": (
+                    "evergreen-"
+                    + topic_key
+                ),
+                "topic": item[
+                    "topic"
+                ],
+                "text": item[
+                    "topic"
+                ],
+                "category": item[
+                    "category"
+                ],
+            }
+        )
+
+    return candidates
 
 
 # ==================================================================
@@ -1139,9 +1687,24 @@ def call_gemini_json(
 # ==================================================================
 
 TOPIC_SELECTOR_PROMPT = """
-You are the topic editor for a YouTube Shorts channel.
+You are the topic editor for a high-retention YouTube Shorts channel.
 
 Select ONE candidate for a broad-audience short.
+
+The channel can cover:
+
+- history
+- strange historical events
+- science
+- engineering
+- inventions
+- technology
+- transportation
+- nature
+- animals
+- mysteries
+- unusual human events
+- surprising trivia
 
 Prioritize:
 
@@ -1151,6 +1714,7 @@ Prioritize:
 - strong storytelling potential
 - factual reliability
 - a story that can be explained in 30–45 seconds
+- topics that work for a worldwide audience
 
 Avoid:
 
@@ -1163,18 +1727,19 @@ Avoid:
 - topics that need a long explanation
 
 For historical events:
-Prefer events involving something strange, unexpected, impressive,
+Prefer something strange, unexpected, impressive,
 dangerous, mysterious, clever, or counterintuitive.
 
 For trivia:
-Prefer facts that create an immediate "wait, really?" reaction.
+Prefer facts that create an immediate
+"wait, really?" reaction.
 
 Return ONLY valid JSON.
 
 {{
   "selected_index": 0,
   "topic": "short topic description",
-  "category": "on_this_day",
+  "category": "history",
   "angle": "specific story angle",
   "source_summary": "brief factual basis"
 }}
@@ -1221,7 +1786,7 @@ def select_topic(
 
     result = call_gemini_json(
         prompt,
-        temperature=0.5,
+        temperature=0.65,
     )
 
     index = result.get(
@@ -1289,6 +1854,7 @@ def get_dynamic_topic():
         [
             "on_this_day",
             "trivia",
+            "evergreen",
         ],
         weights=[
             CONTENT_WEIGHTS[
@@ -1297,74 +1863,119 @@ def get_dynamic_topic():
             CONTENT_WEIGHTS[
                 "trivia"
             ],
+            CONTENT_WEIGHTS[
+                "evergreen"
+            ],
         ],
         k=1,
     )[0]
 
-    if (
-        source
-        == "on_this_day"
-    ):
+    candidates = []
+
+    if source == "on_this_day":
 
         candidates = (
             fetch_on_this_day()
         )
 
-        if candidates:
+        if not candidates:
 
-            return select_topic(
-                candidates
+            candidates = (
+                fetch_trivia()
             )
+
+    elif source == "trivia":
 
         candidates = (
             fetch_trivia()
         )
 
-        if candidates:
+        if not candidates:
 
-            return select_topic(
-                candidates
+            candidates = (
+                fetch_on_this_day()
             )
 
     else:
 
         candidates = (
-            fetch_trivia()
+            get_evergreen_candidates()
         )
 
-        if candidates:
+    # Add some evergreen choices to
+    # live candidates when possible.
+    #
+    # This prevents the channel from
+    # becoming too dependent on today's
+    # available events.
+    evergreen = (
+        get_evergreen_candidates()
+    )
 
-            return select_topic(
-                candidates
+    if candidates:
+
+        candidates.extend(
+            random.sample(
+                evergreen,
+                min(
+                    8,
+                    len(evergreen),
+                ),
             )
-
-        candidates = (
-            fetch_on_this_day()
         )
 
-        if candidates:
+        random.shuffle(
+            candidates
+        )
 
-            return select_topic(
-                candidates
-            )
+        return select_topic(
+            candidates[:40]
+        )
+
+    if evergreen:
+
+        return select_topic(
+            evergreen[:30]
+        )
 
     print(
         "      APIs unavailable."
     )
 
-    print(
-        "      Using fallback topic."
-    )
-
+    # Final emergency fallback.
     fallback = random.choice(
-        FALLBACK_TOPICS
+        [
+            {
+                "topic": (
+                    "why the pyramids "
+                    "still stand today"
+                ),
+                "category": "history",
+            },
+            {
+                "topic": (
+                    "how Roman concrete "
+                    "could last for centuries"
+                ),
+                "category": "history",
+            },
+            {
+                "topic": (
+                    "why sharks are "
+                    "older than trees"
+                ),
+                "category": "nature",
+            },
+        ]
     )
 
     return {
         "source": "fallback",
         "source_id": (
             "fallback-"
-            + fallback["topic"]
+            + normalize_topic_key(
+                fallback["topic"]
+            )
         ),
         "topic": fallback[
             "topic"
@@ -1386,10 +1997,7 @@ You are the lead writer for a high-retention YouTube Shorts channel.
 
 Write ONE continuous 30–45 second story.
 
-The video uses Minecraft, Roblox, building, parkour, or satisfying
-gameplay as the background.
-
-The gameplay is NOT related to the story.
+The background video is unrelated footage.
 
 The narration must therefore carry the entertainment.
 
@@ -1473,9 +2081,31 @@ Target 85–115 spoken words.
 
 IMPORTANT:
 
-Do NOT describe the gameplay.
+Do NOT describe the footage.
 
-Do NOT pretend the gameplay is connected to the story.
+Do NOT pretend the footage is connected to the story.
+
+FOOTAGE:
+
+Choose ONE footage category that would visually retain attention
+while the narration plays.
+
+Available categories:
+
+"construction"
+"machines"
+"cars"
+"nature"
+"satisfying"
+"sports"
+"animation"
+"ocean"
+"aviation"
+"general"
+
+The footage does NOT need to literally depict the story.
+
+Prefer visually dynamic footage.
 
 CAPTIONS:
 
@@ -1500,17 +2130,6 @@ or:
 "FOR DAYS"
 "AND NOBODY KNEW WHY"
 
-GAMEPLAY:
-
-The program automatically chooses the gameplay.
-
-Choose the general gameplay style that would work best:
-
-"building"
-"parkour"
-"satisfying"
-"adventure"
-
 Return ONLY valid JSON.
 
 Exact structure:
@@ -1519,7 +2138,7 @@ Exact structure:
   "title": "under 60 characters",
   "hook": "first narration sentence",
   "ending_style": "loop",
-  "gameplay_style": "building",
+  "footage_style": "construction",
   "scenes": [
     {{
       "narration": "scene narration",
@@ -1643,8 +2262,6 @@ def validate_script(
             "Empty title."
         )
 
-    # YouTube title target:
-    # under 60 characters.
     if len(title) > 60:
 
         title = (
@@ -1771,28 +2388,32 @@ def validate_script(
             "caption_chunks"
         ] = cleaned
 
-    gameplay_style = data.get(
-        "gameplay_style",
-        "building",
+    footage_style = data.get(
+        "footage_style",
+        "general",
     )
 
-    allowed_styles = [
-        "building",
-        "parkour",
-        "satisfying",
-        "adventure",
-    ]
-
-    if (
-        gameplay_style
-        not in allowed_styles
+    if not isinstance(
+        footage_style,
+        str,
     ):
 
-        gameplay_style = "building"
+        footage_style = "general"
+
+    footage_style = (
+        footage_style.lower().strip()
+    )
+
+    if (
+        footage_style
+        not in FOOTAGE_STYLES
+    ):
+
+        footage_style = "general"
 
     data[
-        "gameplay_style"
-    ] = gameplay_style
+        "footage_style"
+    ] = footage_style
 
     hashtags = data.get(
         "hashtags",
@@ -1811,7 +2432,6 @@ def validate_script(
         hashtags = [
             "#shorts",
             "#facts",
-            "#history",
         ]
 
     data["hashtags"] = [
@@ -1869,9 +2489,9 @@ def synthesize_scene_audio(
         AudioFileClip,
     )
 
-    voice = random.choice(
-        TTS_VOICES
-    )
+    # IMPORTANT:
+    # The voice is fixed.
+    voice = TTS_VOICE
 
     print(
         f"      Voice: {voice}"
@@ -1920,12 +2540,32 @@ def synthesize_scene_audio(
 
 
 # ==================================================================
-# GAMEPLAY DISCOVERY
+# FOOTAGE DISCOVERY
 # ==================================================================
 
-def get_gameplay_files():
+def get_footage_root():
 
-    if not GAMEPLAY_DIR.exists():
+    if FOOTAGE_DIR.exists():
+
+        return FOOTAGE_DIR
+
+    if GAMEPLAY_DIR.exists():
+
+        print(
+            "      Using legacy "
+            "gameplay/ directory."
+        )
+
+        return GAMEPLAY_DIR
+
+    return FOOTAGE_DIR
+
+
+def get_footage_files():
+
+    root = get_footage_root()
+
+    if not root.exists():
 
         return []
 
@@ -1938,7 +2578,7 @@ def get_gameplay_files():
 
     files = []
 
-    for path in GAMEPLAY_DIR.rglob(
+    for path in root.rglob(
         "*"
     ):
 
@@ -1960,7 +2600,11 @@ def get_gameplay_files():
     return files
 
 
-def detect_gameplay_style(
+# ==================================================================
+# FOOTAGE STYLE DETECTION
+# ==================================================================
+
+def detect_footage_style(
     path
 ):
 
@@ -1969,109 +2613,294 @@ def detect_gameplay_style(
         for part in path.parts
     ]
 
-    filename = path.stem.lower()
+    filename = (
+        path.stem.lower()
+    )
 
     combined = " ".join(
         parts
         + [filename]
     )
 
-    if "roblox" in combined:
+    # Order matters.
+    if any(
+        word in combined
+        for word in [
+            "construction",
+            "building",
+            "build",
+            "bridge",
+            "architecture",
+        ]
+    ):
 
-        return "roblox"
+        return "construction"
 
-    if "minecraft" in combined:
+    if any(
+        word in combined
+        for word in [
+            "machine",
+            "factory",
+            "industrial",
+            "manufacturing",
+            "robot",
+        ]
+    ):
 
-        return "minecraft"
+        return "machines"
 
-    if "parkour" in combined:
+    if any(
+        word in combined
+        for word in [
+            "car",
+            "cars",
+            "racing",
+            "race",
+            "f1",
+            "formula",
+            "drift",
+        ]
+    ):
 
-        return "parkour"
+        return "cars"
 
-    if "build" in combined:
+    if any(
+        word in combined
+        for word in [
+            "nature",
+            "animal",
+            "wildlife",
+            "forest",
+            "mountain",
+            "landscape",
+        ]
+    ):
 
-        return "building"
+        return "nature"
 
-    if "satisfying" in combined:
+    if any(
+        word in combined
+        for word in [
+            "satisfying",
+            "oddly",
+            "asmr",
+            "cleaning",
+            "restoration",
+            "process",
+        ]
+    ):
 
         return "satisfying"
+
+    if any(
+        word in combined
+        for word in [
+            "sport",
+            "sports",
+            "football",
+            "soccer",
+            "basketball",
+            "skate",
+            "skating",
+            "parkour",
+        ]
+    ):
+
+        return "sports"
+
+    if any(
+        word in combined
+        for word in [
+            "animation",
+            "animated",
+            "cartoon",
+        ]
+    ):
+
+        return "animation"
+
+    if any(
+        word in combined
+        for word in [
+            "ocean",
+            "sea",
+            "underwater",
+            "ship",
+            "submarine",
+            "water",
+        ]
+    ):
+
+        return "ocean"
+
+    if any(
+        word in combined
+        for word in [
+            "aviation",
+            "airplane",
+            "aircraft",
+            "plane",
+            "airport",
+            "flight",
+        ]
+    ):
+
+        return "aviation"
+
+    # Legacy Minecraft/Roblox
+    # footage can still be used.
+    if (
+        "minecraft"
+        in combined
+        or "roblox"
+        in combined
+    ):
+
+        return "general"
 
     return "general"
 
 
-def select_gameplay(
+# ==================================================================
+# FOOTAGE SELECTION
+# ==================================================================
+
+def select_footage(
     style=None
 ):
 
-    files = get_gameplay_files()
+    files = get_footage_files()
 
     if not files:
 
         raise RuntimeError(
-            "\nNo gameplay videos "
+            "\nNo footage videos "
             "were found.\n\n"
-            "Create a gameplay/ "
-            "folder and add your "
-            "videos.\n\n"
+            "Create a footage/ "
+            "folder and add videos.\n\n"
             "Example:\n"
-            "gameplay/minecraft/"
-            "build01.mp4\n"
-            "gameplay/roblox/"
-            "build01.mp4\n"
+            "footage/construction/"
+            "building01.mp4\n"
+            "footage/cars/"
+            "racing01.mp4\n"
+            "footage/nature/"
+            "nature01.mp4\n"
         )
 
-    # Try to match the style.
-    if style:
-
-        style_matches = []
-
-        for path in files:
-
-            detected = (
-                detect_gameplay_style(
-                    path
-                )
-            )
-
-            # Minecraft and Roblox
-            # are both treated as
-            # building/general footage.
-            if (
-                style.lower()
-                in detected.lower()
-                or detected.lower()
-                in style.lower()
-            ):
-
-                style_matches.append(
-                    path
-                )
-
-            elif (
-                style == "building"
-                and detected
-                in (
-                    "minecraft",
-                    "roblox",
-                    "building",
-                )
-            ):
-
-                style_matches.append(
-                    path
-                )
-
-        if style_matches:
-
-            files = style_matches
-
-    selected = random.choice(
-        files
+    style = (
+        str(style or "general")
+        .lower()
+        .strip()
     )
 
     print(
-        f"      Gameplay: "
-        f"{selected}"
+        f"      Requested footage "
+        f"style: {style}"
+    )
+
+    # --------------------------------------------------------------
+    # FIRST: MATCH STYLE
+    # --------------------------------------------------------------
+
+    style_matches = []
+
+    for path in files:
+
+        detected = (
+            detect_footage_style(
+                path
+            )
+        )
+
+        if detected == style:
+
+            style_matches.append(
+                path
+            )
+
+    # --------------------------------------------------------------
+    # SECOND: GENERAL FOOTAGE
+    # --------------------------------------------------------------
+
+    if not style_matches:
+
+        style_matches = [
+            path
+            for path in files
+            if (
+                detect_footage_style(
+                    path
+                )
+                == "general"
+            )
+        ]
+
+    # --------------------------------------------------------------
+    # THIRD: ANY FOOTAGE
+    # --------------------------------------------------------------
+
+    if not style_matches:
+
+        style_matches = files.copy()
+
+    # --------------------------------------------------------------
+    # AVOID RECENTLY USED FOOTAGE
+    # --------------------------------------------------------------
+
+    used = set(
+        get_used_footage()
+    )
+
+    unused_matches = [
+        path
+        for path in style_matches
+        if str(path) not in used
+    ]
+
+    # If every matching clip has
+    # already been used, reset only
+    # the footage pool.
+    if not unused_matches:
+
+        print(
+            "      All matching footage "
+            "has been used."
+        )
+
+        print(
+            "      Resetting footage "
+            "rotation for this category."
+        )
+
+        unused_matches = (
+            style_matches
+        )
+
+        # If everything globally has
+        # been used, clear the pool.
+        if not unused_matches:
+
+            reset_used_footage()
+
+            unused_matches = files
+
+    selected = random.choice(
+        unused_matches
+    )
+
+    detected_style = (
+        detect_footage_style(
+            selected
+        )
+    )
+
+    print(
+        f"      Footage: {selected}"
+    )
+
+    print(
+        f"      Detected style: "
+        f"{detected_style}"
     )
 
     return selected
@@ -2258,11 +3087,11 @@ def add_background_music(
 
 
 # ==================================================================
-# GAMEPLAY VIDEO PREPARATION
+# VIDEO PREPARATION
 # ==================================================================
 
-def prepare_gameplay_clip(
-    gameplay_path,
+def prepare_footage_clip(
+    footage_path,
     duration,
 ):
 
@@ -2272,11 +3101,11 @@ def prepare_gameplay_clip(
     )
 
     print(
-        "      Loading gameplay..."
+        "      Loading footage..."
     )
 
     clip = VideoFileClip(
-        str(gameplay_path)
+        str(footage_path)
     ).without_audio()
 
     if not clip.duration:
@@ -2284,7 +3113,7 @@ def prepare_gameplay_clip(
         clip.close()
 
         raise RuntimeError(
-            "Gameplay video has "
+            "Footage video has "
             "no usable duration."
         )
 
@@ -2298,12 +3127,12 @@ def prepare_gameplay_clip(
     ):
 
         print(
-            "      Gameplay is shorter "
+            "      Footage is shorter "
             "than the Short."
         )
 
         print(
-            "      Looping gameplay "
+            "      Looping footage "
             "to fill duration."
         )
 
@@ -2482,6 +3311,8 @@ def create_caption_clip(
             text_align="center",
         )
 
+    # Slightly higher than v7 so captions
+    # don't sit too close to the bottom.
     return (
         txt
         .with_start(
@@ -2496,7 +3327,7 @@ def create_caption_clip(
         .with_position(
             (
                 "center",
-                1230,
+                1120,
             )
         )
     )
@@ -2509,7 +3340,7 @@ def create_caption_clip(
 def build_video(
     script,
     audio_clips,
-    gameplay_path,
+    footage_path,
     run_dir,
 ):
 
@@ -2557,12 +3388,12 @@ def build_video(
         )
 
     # --------------------------------------------------------------
-    # GAMEPLAY
+    # FOOTAGE
     # --------------------------------------------------------------
 
-    gameplay = (
-        prepare_gameplay_clip(
-            gameplay_path,
+    footage = (
+        prepare_footage_clip(
+            footage_path,
             total_duration,
         )
     )
@@ -2665,7 +3496,7 @@ def build_video(
 
     final = CompositeVideoClip(
         [
-            gameplay,
+            footage,
             *caption_layers,
         ],
         size=(
@@ -2713,7 +3544,7 @@ def build_video(
     # --------------------------------------------------------------
 
     try:
-        gameplay.close()
+        footage.close()
     except Exception:
         pass
 
@@ -2750,11 +3581,11 @@ def run_pipeline():
     )
 
     print(
-        "SPACE FACTS PIPELINE v7"
+        "SPACE FACTS PIPELINE v8"
     )
 
     print(
-        "GAMEPLAY SHORTS FORMAT"
+        "RANDOM TOPIC + RANDOM FOOTAGE FORMAT"
     )
 
     print(
@@ -2766,7 +3597,7 @@ def run_pipeline():
     # --------------------------------------------------------------
 
     print(
-        "\nFetching a fresh topic..."
+        "\nFetching a fresh random topic..."
     )
 
     topic_data = (
@@ -2811,7 +3642,7 @@ def run_pipeline():
     # --------------------------------------------------------------
 
     print(
-        "\n[1/5] Generating story..."
+        "\n[1/6] Generating story..."
     )
 
     recent_titles = (
@@ -2834,25 +3665,30 @@ def run_pipeline():
     )
 
     print(
-        "      Gameplay style: "
+        "      Footage style: "
         + script[
-            "gameplay_style"
+            "footage_style"
         ]
     )
 
+    print(
+        "      Voice: "
+        + TTS_VOICE
+    )
+
     # --------------------------------------------------------------
-    # 3. GAMEPLAY
+    # 3. FOOTAGE
     # --------------------------------------------------------------
 
     print(
-        "\n[2/5] Selecting gameplay..."
+        "\n[2/6] Selecting footage..."
     )
 
-    gameplay_path = (
-        select_gameplay(
+    footage_path = (
+        select_footage(
             script.get(
-                "gameplay_style",
-                "building",
+                "footage_style",
+                "general",
             )
         )
     )
@@ -2893,7 +3729,6 @@ def run_pipeline():
         / safe_title[:50]
     )
 
-    # Prevent accidental collision.
     if run_dir.exists():
 
         run_dir = (
@@ -2916,7 +3751,10 @@ def run_pipeline():
         exist_ok=True,
     )
 
-    # Save metadata.
+    # --------------------------------------------------------------
+    # SAVE METADATA
+    # --------------------------------------------------------------
+
     (
         run_dir
         / "script.json"
@@ -2925,9 +3763,10 @@ def run_pipeline():
             {
                 "topic": topic_data,
                 "script": script,
-                "gameplay": str(
-                    gameplay_path
+                "footage": str(
+                    footage_path
                 ),
+                "voice": TTS_VOICE,
             },
             indent=2,
             ensure_ascii=False,
@@ -2940,7 +3779,7 @@ def run_pipeline():
     # --------------------------------------------------------------
 
     print(
-        "\n[3/5] Synthesizing narration..."
+        "\n[3/6] Synthesizing narration..."
     )
 
     audio_clips = (
@@ -2955,13 +3794,13 @@ def run_pipeline():
     # --------------------------------------------------------------
 
     print(
-        "\n[4/5] Building gameplay Short..."
+        "\n[4/6] Building Short..."
     )
 
     final_path = build_video(
         script,
         audio_clips,
-        gameplay_path,
+        footage_path,
         run_dir,
     )
 
@@ -2970,7 +3809,7 @@ def run_pipeline():
     # --------------------------------------------------------------
 
     print(
-        "\n[5/5] Uploading to YouTube..."
+        "\n[5/6] Uploading to YouTube..."
     )
 
     hashtags = script.get(
@@ -2978,7 +3817,6 @@ def run_pipeline():
         [
             "#shorts",
             "#facts",
-            "#history",
         ],
     )
 
@@ -3019,7 +3857,8 @@ def run_pipeline():
     )
 
     # --------------------------------------------------------------
-    # ONLY MARK TOPIC USED AFTER SUCCESSFUL UPLOAD
+    # ONLY MARK AS USED AFTER
+    # SUCCESSFUL UPLOAD
     # --------------------------------------------------------------
 
     if source_id:
@@ -3028,12 +3867,24 @@ def run_pipeline():
             source_id
         )
 
-    remember_topic(
-        topic
+    topic_key = (
+        normalize_topic_key(
+            topic
+        )
     )
+
+    if topic_key:
+
+        remember_topic(
+            topic_key
+        )
 
     record_used_title(
         script["title"]
+    )
+
+    remember_footage(
+        footage_path
     )
 
     log_upload(
@@ -3044,6 +3895,15 @@ def run_pipeline():
             "ending_style",
             "loop",
         ),
+        script.get(
+            "footage_style",
+            "general",
+        ),
+        footage_path,
+    )
+
+    print(
+        "\n[6/6] Saving state..."
     )
 
     print(
@@ -3059,7 +3919,15 @@ def run_pipeline():
     )
 
     print(
-        f"Gameplay: {gameplay_path}"
+        f"Topic: {topic}"
+    )
+
+    print(
+        f"Footage: {footage_path}"
+    )
+
+    print(
+        f"Voice: {TTS_VOICE}"
     )
 
     print(
