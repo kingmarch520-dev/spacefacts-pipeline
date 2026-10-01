@@ -103,7 +103,6 @@
     }
   },
   "recent_titles": [
-    "Why the Bible Stops for 400 Years",
     "How Massive the Largest Giant Squid Really Was",
     "Why Blood Turns Green Deep Underwater",
     "Why Entire Empires Vanished Around 1200 BC",
@@ -142,6 +141,13 @@
     "Why Jupiter's Giant Storm Never Stops Spinning",
     "Why the Bible Has Two Stories for Judas's Death",
     "Why the Universe Has a Hard Cutoff",
-    "Why Venus Spins the Wrong Way"
+    "Why Venus Spins the Wrong Way",
+    "Why a Modern Cargo Ship Sailed Into a Hurricane"
+  ],
+  "used_source_ids": [
+    "wikimedia-10-01-2015-the-american-cargo-vessel-ss-el-faro-sinks-with-all-of-its-33-crew-after-steaming-into-the-eyewall-o"
+  ],
+  "used_topic_keys": [
+    "The sinking of the cargo vessel SS El Faro"
   ]
 }
