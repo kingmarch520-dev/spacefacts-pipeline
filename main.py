@@ -1,5 +1,5 @@
 """
-SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v9.2)
+SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v9.3)
 
 FORMAT:
     Interesting stock footage
@@ -15,45 +15,49 @@ VIDEO SOURCE:
     Multiple clips per Short
 
 PIPELINE:
-    1. Fetch fresh On This Day events / trivia / evergreen topics
-    2. Gemini selects a strong topic
-    3. Gemini writes a 30–45 second story
-    4. Gemini generates visual search queries
-    5. Coverr searches for multiple matching clips
-    6. Edge TTS generates narration
-    7. MoviePy creates a 1080x1920 Short
-    8. Dynamic captions are added
-    9. Video is uploaded to YouTube
-   10. State is saved only after successful upload
-
-REQUIRED ENVIRONMENT VARIABLES:
-    GEMINI_API_KEY
-    COVERR_API_KEY
-    YT_CLIENT_ID
-    YT_CLIENT_SECRET
-    YT_REFRESH_TOKEN
-
-OPTIONAL:
-    FOOTAGE_DIR
-    GAMEPLAY_DIR
-    BGM_DIR
+    1. Fetch fresh On This Day events and/or trivia
+    2. Select a strong topic with Gemini
+    3. Generate a 30–45 second Shorts script
+    4. Generate visual search queries
+    5. Search Coverr for multiple clips
+    6. Fall back to local footage if Coverr fails
+    7. Generate narration with Edge TTS
+    8. Build 1080x1920 vertical Short
+    9. Add dynamic captions
+   10. Upload to YouTube
+   11. Save state only after successful upload
 """
 
-from __future__ import annotations
-
-import json
 import os
-import random
 import re
-import sys
+import json
 import time
-import uuid
+import random
+import hashlib
+import html
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from urllib.parse import quote
 
 import requests
 
-# MoviePy 1.0.3
+# ============================================================
+# PILLOW / MOVIEPY 1.0.3 COMPATIBILITY FIX
+# ============================================================
+
+# MoviePy 1.0.3 expects Image.ANTIALIAS.
+# Pillow 10+ removed it and replaced it with Image.Resampling.LANCZOS.
+# Restore the old alias before importing MoviePy.
+from PIL import Image
+
+if not hasattr(Image, "ANTIALIAS"):
+    Image.ANTIALIAS = Image.Resampling.LANCZOS
+
+
+# ============================================================
+# MOVIEPY
+# ============================================================
+
 from moviepy.editor import (
     AudioFileClip,
     CompositeAudioClip,
@@ -63,14 +67,12 @@ from moviepy.editor import (
     concatenate_videoclips,
 )
 
-from PIL import Image, ImageDraw, ImageFont
-
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-VERSION = "v9.2"
+VERSION = "v9.3"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 COVERR_API_KEY = os.environ.get("COVERR_API_KEY", "")
@@ -81,29 +83,19 @@ UPLOAD_LOG_FILE = Path("upload_log.jsonl")
 OUTPUT_DIR = Path("output_spacefacts")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-FOOTAGE_DIR = Path(
-    os.environ.get("FOOTAGE_DIR", "footage")
-)
-
-GAMEPLAY_DIR = Path(
-    os.environ.get("GAMEPLAY_DIR", "gameplay")
-)
+FOOTAGE_DIR = Path(os.environ.get("FOOTAGE_DIR", "footage"))
+GAMEPLAY_DIR = Path(os.environ.get("GAMEPLAY_DIR", "gameplay"))
 
 COVERR_DOWNLOAD_DIR = Path("downloaded_footage")
 COVERR_DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-BGM_DIR = Path(
-    os.environ.get("BGM_DIR", "bgm")
-)
+BGM_DIR = Path(os.environ.get("BGM_DIR", "bgm"))
 
 VIDEO_W = 1080
 VIDEO_H = 1920
 
-CAPTION_FONT_PATH = str(
-    Path(__file__).parent / "Anton-Regular.ttf"
-)
+CAPTION_FONT_PATH = str(Path(__file__).parent / "Anton-Regular.ttf")
 
-# Consistent male narrator
 TTS_VOICE = "en-US-AndrewMultilingualNeural"
 
 COVERR_API_URL = "https://api.coverr.co/videos/search"
@@ -135,12 +127,11 @@ FOOTAGE_STYLES = [
     "general",
 ]
 
-# Gemini fallback order.
-#
-# IMPORTANT:
-# A temporary 503/429 on one model causes the pipeline
-# to immediately try the next model instead of repeatedly
-# hammering the same unavailable model.
+
+# ============================================================
+# GEMINI MODELS
+# ============================================================
+
 GEMINI_MODELS = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
@@ -158,798 +149,592 @@ GEMINI_MODELS = [
 # ============================================================
 
 EVERGREEN_TOPICS = [
-
-    # HISTORY
+    # History
     {
-        "key": "history_roman_concrete",
+        "key": "roman_concrete",
         "category": "history",
-        "topic": "Why Roman concrete survived for thousands of years",
+        "topic": "Why Roman concrete lasted for thousands of years",
     },
     {
-        "key": "history_ancient_egypt_cats",
+        "key": "cats_ancient_egypt",
         "category": "history",
         "topic": "Why cats were important in ancient Egypt",
     },
     {
-        "key": "history_viking_navigation",
+        "key": "viking_navigation",
         "category": "history",
-        "topic": "How Vikings navigated without modern instruments",
+        "topic": "How Vikings navigated across the ocean",
     },
     {
-        "key": "history_pompeii",
+        "key": "pompeii",
         "category": "history",
-        "topic": "What happened to Pompeii during the eruption of Vesuvius",
+        "topic": "What happened when Mount Vesuvius buried Pompeii",
     },
     {
-        "key": "history_titanic",
+        "key": "titanic",
         "category": "history",
         "topic": "Why the Titanic sank so quickly",
     },
     {
-        "key": "history_telegraph",
+        "key": "telegraph",
         "category": "history",
         "topic": "How the telegraph changed communication",
     },
     {
-        "key": "history_black_death",
+        "key": "black_death",
         "category": "history",
-        "topic": "How the Black Death changed medieval Europe",
+        "topic": "How the Black Death spread across Europe",
     },
     {
-        "key": "history_great_fire_london",
+        "key": "great_fire_london",
         "category": "history",
         "topic": "How the Great Fire of London spread",
     },
 
-    # SCIENCE
+    # Science
     {
-        "key": "science_lightning",
+        "key": "lightning",
         "category": "science",
-        "topic": "How lightning becomes hotter than the surface of the Sun",
+        "topic": "How lightning can heat the air around it",
     },
     {
-        "key": "science_ocean_depth",
+        "key": "ocean_depth",
         "category": "science",
-        "topic": "What happens to a human body at extreme ocean depth",
+        "topic": "How deep the deepest part of the ocean really is",
     },
     {
-        "key": "science_black_holes",
+        "key": "black_holes",
         "category": "science",
-        "topic": "What would happen near a black hole",
+        "topic": "What happens near a black hole",
     },
     {
-        "key": "science_banana_radiation",
+        "key": "banana_radiation",
         "category": "science",
         "topic": "Why bananas are slightly radioactive",
     },
     {
-        "key": "science_sound_space",
+        "key": "sound_space",
         "category": "science",
         "topic": "Why sound cannot travel through empty space",
     },
     {
-        "key": "science_sharks",
+        "key": "sharks_electricity",
         "category": "science",
-        "topic": "Why sharks can detect electrical signals",
+        "topic": "How sharks detect tiny electrical signals",
     },
     {
-        "key": "science_ant_strength",
+        "key": "ant_strength",
         "category": "science",
-        "topic": "Why ants can carry many times their own body weight",
+        "topic": "Why ants can carry objects much heavier than themselves",
     },
     {
-        "key": "science_time_dilation",
+        "key": "time_dilation",
         "category": "science",
-        "topic": "How time changes at extremely high speeds",
+        "topic": "How time can move differently at high speeds",
     },
 
-    # ENGINEERING
+    # Engineering
     {
-        "key": "engineering_bridges",
+        "key": "bridges",
         "category": "engineering",
-        "topic": "How suspension bridges stay standing",
+        "topic": "How suspension bridges handle enormous forces",
     },
     {
-        "key": "engineering_tall_buildings",
+        "key": "tall_buildings",
         "category": "engineering",
         "topic": "How skyscrapers survive strong winds",
     },
     {
-        "key": "engineering_dams",
+        "key": "dams",
         "category": "engineering",
-        "topic": "How massive dams hold back millions of tons of water",
+        "topic": "How huge dams hold back millions of tons of water",
     },
     {
-        "key": "engineering_tunnels",
+        "key": "tunnels",
         "category": "engineering",
         "topic": "How engineers build tunnels underground",
     },
     {
-        "key": "engineering_cranes",
+        "key": "cranes",
         "category": "engineering",
-        "topic": "How tower cranes can lift enormous loads",
+        "topic": "How tower cranes lift enormous loads",
     },
     {
-        "key": "engineering_bulldozers",
+        "key": "bulldozers",
         "category": "engineering",
-        "topic": "How bulldozers generate so much pushing force",
+        "topic": "How bulldozers generate enough force to move huge amounts of soil",
     },
 
-    # TECHNOLOGY
+    # Technology
     {
-        "key": "technology_microchips",
+        "key": "microchips",
         "category": "technology",
-        "topic": "How billions of transistors fit inside a tiny chip",
+        "topic": "How billions of transistors fit inside a tiny microchip",
     },
     {
-        "key": "technology_fiber_optics",
+        "key": "fiber_optics",
         "category": "technology",
-        "topic": "How fiber optic cables send data using light",
+        "topic": "How fiber optic cables send information using light",
     },
     {
-        "key": "technology_gps",
+        "key": "gps",
         "category": "technology",
-        "topic": "How GPS knows where you are",
+        "topic": "How GPS satellites know where your phone is",
     },
     {
-        "key": "technology_smartphones",
+        "key": "smartphones",
         "category": "technology",
-        "topic": "How smartphones communicate with cell towers",
+        "topic": "How smartphones became tiny computers",
     },
 
-    # TRANSPORT
+    # Transport
     {
-        "key": "transport_jet_engine",
+        "key": "jet_engines",
         "category": "transport",
-        "topic": "How a jet engine produces enormous thrust",
+        "topic": "How jet engines produce enormous thrust",
     },
     {
-        "key": "transport_supersonic",
+        "key": "supersonic",
         "category": "transport",
         "topic": "What happens when an aircraft breaks the sound barrier",
     },
     {
-        "key": "transport_train_brakes",
+        "key": "train_brakes",
         "category": "transport",
-        "topic": "How enormous trains stop safely",
+        "topic": "How massive trains stop safely",
     },
     {
-        "key": "transport_container_ship",
+        "key": "container_ships",
         "category": "transport",
         "topic": "How container ships carry thousands of containers",
     },
 
-    # NATURE
+    # Nature
     {
-        "key": "nature_octopus",
+        "key": "octopus",
         "category": "nature",
-        "topic": "Why octopuses have three hearts",
+        "topic": "Why octopuses are so unusual",
     },
     {
-        "key": "nature_crows",
+        "key": "crows",
         "category": "nature",
         "topic": "Why crows are surprisingly intelligent",
     },
     {
-        "key": "nature_birds_migration",
+        "key": "bird_migration",
         "category": "nature",
         "topic": "How birds navigate during long migrations",
     },
     {
-        "key": "nature_volcanoes",
+        "key": "volcanoes",
         "category": "nature",
-        "topic": "What causes a volcano to erupt",
+        "topic": "What happens beneath a volcano before an eruption",
     },
     {
-        "key": "nature_tornadoes",
+        "key": "tornadoes",
         "category": "nature",
-        "topic": "How powerful tornadoes form",
+        "topic": "How tornadoes form",
     },
     {
-        "key": "nature_lightning",
+        "key": "lightning_nature",
         "category": "nature",
-        "topic": "Why lightning strikes certain places more often",
+        "topic": "Why lightning strikes some places more often than others",
     },
 ]
-
-
-# ============================================================
-# UTILITY
-# ============================================================
-
-def log(message: str) -> None:
-    print(f"[SpaceFacts] {message}", flush=True)
-
-
-def clean_text(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def slugify(value: str) -> str:
-    value = value.lower()
-    value = re.sub(r"[^a-z0-9]+", "_", value)
-    value = re.sub(r"_+", "_", value)
-    return value.strip("_")[:80]
-
-
-def clamp(
-    value: float,
-    low: float,
-    high: float,
-) -> float:
-    return max(low, min(high, value))
-
-
-def safe_json_loads(text: str) -> Any:
-    text = text.strip()
-
-    if text.startswith("```"):
-        text = re.sub(
-            r"^```(?:json)?\s*",
-            "",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-        text = re.sub(
-            r"\s*```$",
-            "",
-            text,
-        )
-
-    try:
-        return json.loads(text)
-
-    except Exception:
-        pass
-
-    match = re.search(
-        r"\{.*\}",
-        text,
-        flags=re.DOTALL,
-    )
-
-    if match:
-        return json.loads(
-            match.group(0)
-        )
-
-    raise ValueError(
-        "Could not extract valid JSON from Gemini."
-    )
 
 
 # ============================================================
 # STATE
 # ============================================================
 
-def default_state() -> Dict[str, Any]:
-    return {
-        "recent_titles": [],
-        "used_source_ids": [],
-        "used_topic_keys": [],
-        "used_gameplay": [],
-    }
+DEFAULT_STATE = {
+    "recent_titles": [],
+    "used_source_ids": [],
+    "used_topic_keys": [],
+    "used_gameplay": [],
+}
 
 
-def load_state() -> Dict[str, Any]:
-
+def load_state():
     if not STATE_FILE.exists():
-        return default_state()
+        return DEFAULT_STATE.copy()
 
     try:
-        data = json.loads(
-            STATE_FILE.read_text(
-                encoding="utf-8"
-            )
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+
+        if not isinstance(data, dict):
+            return DEFAULT_STATE.copy()
+
+        for key, value in DEFAULT_STATE.items():
+            if key not in data or not isinstance(data[key], list):
+                data[key] = []
+
+        return data
+
+    except Exception as e:
+        print(f"[SpaceFacts] Could not load state: {e}")
+        return DEFAULT_STATE.copy()
+
+
+def save_state(state):
+    try:
+        STATE_FILE.write_text(
+            json.dumps(state, indent=2, ensure_ascii=False),
+            encoding="utf-8",
         )
-
-        if not isinstance(
-            data,
-            dict,
-        ):
-            return default_state()
-
-        state = default_state()
-        state.update(data)
-
-        return state
-
-    except Exception as exc:
-
-        log(
-            f"Could not load state file: {exc}"
-        )
-
-        return default_state()
-
-
-def save_state(
-    state: Dict[str, Any],
-) -> None:
-
-    temp_file = STATE_FILE.with_suffix(
-        ".tmp"
-    )
-
-    temp_file.write_text(
-        json.dumps(
-            state,
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    temp_file.replace(
-        STATE_FILE
-    )
-
-
-def remember_title(
-    state: Dict[str, Any],
-    title: str,
-) -> None:
-
-    titles = state.setdefault(
-        "recent_titles",
-        [],
-    )
-
-    titles.append(title)
-
-    state["recent_titles"] = titles[-40:]
-
-
-def remember_source(
-    state: Dict[str, Any],
-    source_id: str,
-) -> None:
-
-    if not source_id:
-        return
-
-    sources = state.setdefault(
-        "used_source_ids",
-        [],
-    )
-
-    if source_id not in sources:
-        sources.append(source_id)
-
-    state["used_source_ids"] = sources[-500:]
-
-
-def remember_topic(
-    state: Dict[str, Any],
-    topic_key: str,
-) -> None:
-
-    if not topic_key:
-        return
-
-    topics = state.setdefault(
-        "used_topic_keys",
-        [],
-    )
-
-    if topic_key not in topics:
-        topics.append(topic_key)
-
-    state["used_topic_keys"] = topics[-500:]
-
-
-def remember_footage(
-    state: Dict[str, Any],
-    path: str,
-) -> None:
-
-    if not path:
-        return
-
-    footage = state.setdefault(
-        "used_gameplay",
-        [],
-    )
-
-    if path not in footage:
-        footage.append(path)
-
-    state["used_gameplay"] = footage[-500:]
+    except Exception as e:
+        print(f"[SpaceFacts] Failed to save state: {e}")
+        raise
 
 
 # ============================================================
-# ENVIRONMENT
+# UTILITIES
 # ============================================================
 
-def validate_environment() -> None:
+def clean_text(value):
+    if value is None:
+        return ""
 
-    required = {
-        "GEMINI_API_KEY": GEMINI_API_KEY,
-        "COVERR_API_KEY": COVERR_API_KEY,
-        "YT_CLIENT_ID": os.environ.get(
-            "YT_CLIENT_ID",
-            "",
-        ),
-        "YT_CLIENT_SECRET": os.environ.get(
-            "YT_CLIENT_SECRET",
-            "",
-        ),
-        "YT_REFRESH_TOKEN": os.environ.get(
-            "YT_REFRESH_TOKEN",
-            "",
-        ),
-    }
-
-    missing = [
-        name
-        for name, value in required.items()
-        if not value
-    ]
-
-    if missing:
-        raise RuntimeError(
-            "Missing environment variables: "
-            + ", ".join(missing)
-        )
-
-    if not Path(
-        CAPTION_FONT_PATH
-    ).exists():
-
-        raise RuntimeError(
-            f"Missing required font: "
-            f"{CAPTION_FONT_PATH}"
-        )
+    value = html.unescape(str(value))
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
 
-# ============================================================
-# WIKIMEDIA ON THIS DAY
-# ============================================================
+def slugify(value):
+    value = clean_text(value).lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    value = value.strip("-")
 
-def fetch_on_this_day() -> List[Dict[str, Any]]:
+    if not value:
+        value = "clip"
 
-    month = time.strftime("%m")
-    day = time.strftime("%d")
+    return value[:80]
 
-    url = (
-        "https://en.wikipedia.org/api/rest_v1/"
-        f"feed/onthisday/events/{month}/{day}"
-    )
 
-    log(
-        f"Fetching Wikimedia events for "
-        f"{month}/{day}..."
-    )
+def safe_json_loads(text):
+    text = text.strip()
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text)
+        text = re.sub(r"```$", "", text)
+        text = text.strip()
 
     try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
 
-        response = requests.get(
-            url,
-            timeout=REQUEST_TIMEOUT,
-            headers={
-                "User-Agent":
-                    "SpaceFactsPipeline/9.2"
-            },
-        )
+        if start >= 0 and end > start:
+            return json.loads(text[start:end + 1])
 
-        response.raise_for_status()
+        raise
 
-        data = response.json()
 
-        events = data.get(
-            "events",
-            [],
-        )
+def weighted_choice(items):
+    names = list(items.keys())
+    weights = list(items.values())
+    return random.choices(names, weights=weights, k=1)[0]
 
-        results = []
 
-        for event in events:
+def hash_text(text):
+    return hashlib.sha256(
+        text.encode("utf-8", errors="ignore")
+    ).hexdigest()[:16]
 
-            year = event.get(
-                "year"
-            )
 
-            text = clean_text(
-                event.get(
-                    "text"
-                )
-            )
+# ============================================================
+# GEMINI
+# ============================================================
 
-            if not text:
+def get_gemini_client():
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is missing.")
+
+    from google import genai
+
+    return genai.Client(api_key=GEMINI_API_KEY)
+
+
+def discover_gemini_models(client):
+    """
+    Discover available Gemini models.
+
+    We still retain the static fallback list because API model
+    discovery can occasionally fail or return unexpected formats.
+    """
+
+    discovered = []
+
+    try:
+        for model in client.models.list():
+            name = getattr(model, "name", "")
+
+            if not name:
                 continue
 
-            pages = event.get(
-                "pages",
-                [],
-            )
+            name = name.replace("models/", "")
 
-            page_title = ""
+            if "gemini" not in name.lower():
+                continue
 
-            if pages:
+            if "flash" not in name.lower():
+                continue
 
-                page_title = clean_text(
-                    pages[0].get(
-                        "title"
-                    )
+            discovered.append(name)
+
+    except Exception as e:
+        print(f"[SpaceFacts] Gemini model discovery failed: {e}")
+
+    preferred = []
+
+    for model in GEMINI_MODELS:
+        if model in discovered:
+            preferred.append(model)
+
+    for model in discovered:
+        if model not in preferred:
+            preferred.append(model)
+
+    if not preferred:
+        preferred = GEMINI_MODELS.copy()
+
+    return preferred
+
+
+def is_service_unavailable(error):
+    text = str(error).upper()
+
+    return (
+        "503" in text
+        or "UNAVAILABLE" in text
+        or "SERVICE UNAVAILABLE" in text
+    )
+
+
+def is_quota_or_rate_limit(error):
+    text = str(error).upper()
+
+    return (
+        "429" in text
+        or "RESOURCE_EXHAUSTED" in text
+        or "QUOTA" in text
+        or "RATE LIMIT" in text
+        or "RATE_LIMIT" in text
+    )
+
+
+def gemini_generate(prompt, temperature=0.8):
+    client = get_gemini_client()
+
+    models = discover_gemini_models(client)
+
+    last_error = None
+
+    for model_index, model_name in enumerate(models):
+
+        print(
+            f"[SpaceFacts] Trying Gemini model "
+            f"{model_index + 1}/{len(models)}: {model_name}"
+        )
+
+        for attempt in range(2):
+
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={
+                        "temperature": temperature,
+                    },
                 )
 
+                text = getattr(response, "text", None)
+
+                if not text:
+                    raise RuntimeError(
+                        f"Gemini returned an empty response using {model_name}."
+                    )
+
+                print(
+                    f"[SpaceFacts] Gemini succeeded with {model_name}"
+                )
+
+                return text.strip()
+
+            except Exception as e:
+                last_error = e
+
+                print(
+                    f"[SpaceFacts] Gemini {model_name} "
+                    f"attempt {attempt + 1}/2 failed: {e}"
+                )
+
+                if is_service_unavailable(e):
+                    print(
+                        f"[SpaceFacts] {model_name} is temporarily "
+                        f"unavailable. Switching to next Gemini model..."
+                    )
+                    break
+
+                if is_quota_or_rate_limit(e):
+                    print(
+                        f"[SpaceFacts] {model_name} hit a quota/rate "
+                        f"limit. Switching to next Gemini model..."
+                    )
+                    break
+
+                if attempt == 0:
+                    time.sleep(2)
+
+        print("[SpaceFacts] Moving to next Gemini model...")
+
+    raise RuntimeError(
+        f"All Gemini models failed. Last error: {last_error}"
+    )
+
+
+# ============================================================
+# WIKIMEDIA — ON THIS DAY
+# ============================================================
+
+def fetch_on_this_day():
+    today = datetime.now(timezone.utc)
+
+    month = today.month
+    day = today.day
+
+    print(
+        f"[SpaceFacts] Fetching Wikimedia events for "
+        f"{month:02d}/{day:02d}..."
+    )
+
+    url = (
+        "https://en.wikipedia.org/api/rest_v1/feed/"
+        f"onthisday/events/{month}/{day}"
+    )
+
+    response = requests.get(
+        url,
+        timeout=REQUEST_TIMEOUT,
+        headers={
+            "User-Agent": "SpaceFactsPipeline/9.3"
+        },
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    events = []
+
+    for event in data.get("events", []):
+        year = event.get("year")
+        text = clean_text(event.get("text"))
+
+        if not text:
+            continue
+
+        pages = event.get("pages") or []
+
+        source_id = ""
+
+        if pages:
             source_id = (
-                f"wikimedia-{month}-"
-                f"{day}-{year}-"
-                f"{slugify(text)}"
+                pages[0].get("pageid")
+                or pages[0].get("title")
+                or ""
             )
 
-            results.append(
-                {
-                    "source_id": source_id,
-                    "category": "history",
-                    "year": year,
-                    "topic": text,
-                    "page_title": page_title,
-                }
+        if not source_id:
+            source_id = hash_text(
+                f"{year}:{text}"
             )
 
-        log(
-            f"Found {len(results)} usable "
-            f"historical events."
-        )
+        events.append({
+            "source_id": str(source_id),
+            "year": year,
+            "text": text,
+            "pages": pages,
+        })
 
-        return results
-
-    except Exception as exc:
-
-        log(
-            f"Wikimedia request failed: {exc}"
-        )
-
-        return []
-
-
-# ============================================================
-# OPEN TRIVIA DATABASE
-# ============================================================
-
-def fetch_trivia() -> List[Dict[str, Any]]:
-
-    import html
-
-    url = (
-        "https://opentdb.com/api.php"
-        "?amount=15"
-        "&type=multiple"
+    print(
+        f"[SpaceFacts] Found {len(events)} usable "
+        f"historical events."
     )
 
-    try:
+    return events
 
-        response = requests.get(
-            url,
-            timeout=REQUEST_TIMEOUT,
-            headers={
-                "User-Agent":
-                    "SpaceFactsPipeline/9.2"
-            },
-        )
 
-        response.raise_for_status()
+# ============================================================
+# TRIVIA
+# ============================================================
 
-        data = response.json()
+def fetch_trivia():
+    print("[SpaceFacts] Fetching trivia...")
 
-        if data.get(
-            "response_code"
-        ) != 0:
+    url = "https://opentdb.com/api.php"
 
-            return []
+    response = requests.get(
+        url,
+        params={
+            "amount": 15,
+            "type": "multiple",
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
 
-        results = []
+    response.raise_for_status()
 
-        for item in data.get(
-            "results",
-            [],
-        ):
+    data = response.json()
 
-            question = html.unescape(
-                clean_text(
-                    item.get(
-                        "question"
-                    )
-                )
-            )
+    results = data.get("results", [])
 
-            answer = html.unescape(
-                clean_text(
-                    item.get(
-                        "correct_answer"
-                    )
-                )
-            )
+    trivia = []
 
-            category = clean_text(
-                item.get(
-                    "category"
-                )
-            )
+    for item in results:
+        question = clean_text(item.get("question"))
 
-            if not question:
-                continue
+        if not question:
+            continue
 
-            results.append(
-                {
-                    "source_id":
-                        f"trivia-{slugify(question)}",
-                    "category": "trivia",
-                    "topic": question,
-                    "answer": answer,
-                    "trivia_category": category,
-                }
-            )
+        trivia.append({
+            "source_id": hash_text(question),
+            "category": clean_text(item.get("category")),
+            "question": question,
+            "answer": clean_text(item.get("correct_answer")),
+        })
 
-        return results
-
-    except Exception as exc:
-
-        log(
-            f"Trivia request failed: {exc}"
-        )
-
-        return []
+    return trivia
 
 
 # ============================================================
 # TOPIC SELECTION
 # ============================================================
 
-def weighted_content_type() -> str:
-
-    choices = list(
-        CONTENT_WEIGHTS.keys()
-    )
-
-    weights = [
-        CONTENT_WEIGHTS[item]
-        for item in choices
-    ]
-
-    return random.choices(
-        choices,
-        weights=weights,
-        k=1,
-    )[0]
-
-
-def build_candidates(
-    state: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-
-    content_type = weighted_content_type()
-
-    on_this_day = []
-    trivia = []
-
-    if content_type == "on_this_day":
-        on_this_day = fetch_on_this_day()
-
-    elif content_type == "trivia":
-        trivia = fetch_trivia()
-
-    evergreen = list(
-        EVERGREEN_TOPICS
-    )
-
-    used_sources = set(
-        state.get(
-            "used_source_ids",
-            [],
-        )
-    )
-
-    used_topics = set(
-        state.get(
-            "used_topic_keys",
-            [],
-        )
-    )
-
-    candidates = []
-
-    for item in on_this_day:
-
-        if item["source_id"] not in used_sources:
-            candidates.append(item)
-
-    for item in trivia:
-
-        if item["source_id"] not in used_sources:
-            candidates.append(item)
-
-    for item in evergreen:
-
-        if item["key"] not in used_topics:
-
-            candidates.append(
-                {
-                    "key": item["key"],
-                    "source_id": item["key"],
-                    "category": item["category"],
-                    "topic": item["topic"],
-                    "source_type": "evergreen",
-                }
-            )
-
-    # If a lane is exhausted, allow old candidates.
-    if len(candidates) < 5:
-
-        for item in on_this_day:
-            candidates.append(item)
-
-        for item in trivia:
-            candidates.append(item)
-
-        for item in evergreen:
-
-            candidates.append(
-                {
-                    "key": item["key"],
-                    "source_id": item["key"],
-                    "category": item["category"],
-                    "topic": item["topic"],
-                    "source_type": "evergreen",
-                }
-            )
-
-    random.shuffle(candidates)
-
-    unique = []
-    seen = set()
-
-    for candidate in candidates:
-
-        source_id = candidate.get(
-            "source_id",
-            "",
-        )
-
-        if not source_id:
-            continue
-
-        if source_id in seen:
-            continue
-
-        seen.add(source_id)
-        unique.append(candidate)
-
-        if len(unique) >= 30:
-            break
-
-    return unique
-
-
 TOPIC_SELECTOR_PROMPT = """
 You are selecting a topic for a YouTube Shorts channel.
 
-The channel makes 30–45 second videos about:
-- strange history
-- surprising science
-- engineering
-- technology
-- transportation
-- animals
-- unusual real-world events
-- fascinating facts
+The channel creates short, highly interesting factual videos.
 
 Choose ONE candidate.
 
-The topic should:
-- have a strong curiosity hook
-- be understandable quickly
-- have enough factual material for 85–115 spoken words
-- work with stock video footage
-- avoid politics unless the event itself is historically important
-- avoid conspiracy theories
-- avoid invented facts
-- avoid fake quotations
+Prioritize:
+- Strong curiosity
+- Easy to explain in 30–45 seconds
+- Visually interesting footage
+- A surprising fact or mechanism
+- Factual accuracy
+- Topics that work with stock footage
+
+Avoid:
+- Politics
+- Current political controversies
+- Medical advice
+- Graphic violence
+- Extremely depressing subjects
+- Unsupported claims
+- Topics requiring complicated calculations
 
 Return ONLY valid JSON.
 
@@ -967,378 +752,191 @@ CANDIDATES:
 """
 
 
-# ============================================================
-# GEMINI
-# ============================================================
+def build_candidates(on_this_day, trivia, state):
+    candidates = []
 
-def get_gemini_client():
-
-    from google import genai
-
-    return genai.Client(
-        api_key=GEMINI_API_KEY
+    used_source_ids = set(
+        str(x) for x in state.get("used_source_ids", [])
     )
 
+    used_topic_keys = set(
+        str(x) for x in state.get("used_topic_keys", [])
+    )
 
-def discover_gemini_models(
-    client,
-) -> List[str]:
-    """
-    Discover available Gemini models while preserving
-    our preferred fallback order.
+    # Historical events
+    for event in on_this_day:
+        source_id = str(event["source_id"])
 
-    If model discovery fails, return the configured list.
-    """
+        if source_id in used_source_ids:
+            continue
 
-    discovered = []
+        candidates.append({
+            "source_id": source_id,
+            "type": "on_this_day",
+            "category": "history",
+            "topic": event["text"],
+            "year": event.get("year"),
+        })
+
+    # Trivia
+    for item in trivia:
+        source_id = str(item["source_id"])
+
+        if source_id in used_source_ids:
+            continue
+
+        candidates.append({
+            "source_id": source_id,
+            "type": "trivia",
+            "category": item.get("category", "trivia"),
+            "topic": item["question"],
+            "answer": item["answer"],
+        })
+
+    # Evergreen
+    for item in EVERGREEN_TOPICS:
+        if item["key"] in used_topic_keys:
+            continue
+
+        candidates.append({
+            "source_id": f"evergreen:{item['key']}",
+            "type": "evergreen",
+            "category": item["category"],
+            "topic": item["topic"],
+            "key": item["key"],
+        })
+
+    random.shuffle(candidates)
+
+    # Prevent an enormous prompt
+    return candidates[:80]
+
+
+def select_topic(state):
+    print("[SpaceFacts] Fetching a fresh topic...")
+
+    today = datetime.now(timezone.utc)
 
     try:
-
-        for model in client.models.list():
-
-            name = clean_text(
-                getattr(
-                    model,
-                    "name",
-                    "",
-                )
-            )
-
-            if not name:
-                continue
-
-            # Remove the optional "models/" prefix.
-            normalized = name
-
-            if normalized.startswith(
-                "models/"
-            ):
-
-                normalized = normalized[
-                    len("models/"):
-                ]
-
-            # Only use models that appear in our
-            # explicit preferred list.
-            for preferred in GEMINI_MODELS:
-
-                if normalized == preferred:
-
-                    if preferred not in discovered:
-                        discovered.append(
-                            preferred
-                        )
-
-                    break
-
-    except Exception as exc:
-
-        log(
-            f"Could not discover Gemini models: "
-            f"{exc}"
+        on_this_day = fetch_on_this_day()
+    except Exception as e:
+        print(
+            f"[SpaceFacts] On This Day fetch failed: {e}"
         )
+        on_this_day = []
 
-    # If discovery returned useful results, preserve
-    # our preferred order.
-    if discovered:
+    try:
+        trivia = fetch_trivia()
+    except Exception as e:
+        print(
+            f"[SpaceFacts] Trivia fetch failed: {e}"
+        )
+        trivia = []
 
-        ordered = [
-            model
-            for model in GEMINI_MODELS
-            if model in discovered
-        ]
-
-        if ordered:
-            return ordered
-
-    # Fallback if the model listing endpoint is
-    # temporarily unavailable.
-    return list(GEMINI_MODELS)
-
-
-def is_service_unavailable(
-    error_text: str,
-) -> bool:
-
-    upper = error_text.upper()
-
-    return (
-        "503" in upper
-        or "UNAVAILABLE" in upper
-        or "SERVICE UNAVAILABLE" in upper
+    candidates = build_candidates(
+        on_this_day,
+        trivia,
+        state,
     )
-
-
-def is_quota_or_rate_limit(
-    error_text: str,
-) -> bool:
-
-    upper = error_text.upper()
-
-    return (
-        "429" in upper
-        or "RESOURCE_EXHAUSTED" in upper
-        or "QUOTA" in upper
-        or "RATE LIMIT" in upper
-        or "RATE_LIMIT" in upper
-    )
-
-
-def gemini_generate(
-    client,
-    models: List[str],
-    prompt: str,
-    retries_per_model: int = 2,
-) -> str:
-    """
-    Generate text with automatic Gemini model fallback.
-
-    503:
-        Immediately switch to the next model.
-
-    429 / quota:
-        Immediately switch to the next model.
-
-    Other errors:
-        Retry the current model once, then switch.
-
-    This prevents a temporarily overloaded model from
-    killing the entire pipeline.
-    """
-
-    if not models:
-        raise RuntimeError(
-            "No Gemini models configured."
-        )
-
-    last_error = None
-
-    for model_index, model_name in enumerate(
-        models,
-        start=1,
-    ):
-
-        log(
-            f"Trying Gemini model "
-            f"{model_index}/{len(models)}: "
-            f"{model_name}"
-        )
-
-        for attempt in range(
-            1,
-            retries_per_model + 1,
-        ):
-
-            try:
-
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                )
-
-                text = getattr(
-                    response,
-                    "text",
-                    None,
-                )
-
-                if text:
-
-                    log(
-                        f"Gemini succeeded with "
-                        f"{model_name}"
-                    )
-
-                    return text.strip()
-
-                raise RuntimeError(
-                    "Gemini returned empty text."
-                )
-
-            except Exception as exc:
-
-                last_error = exc
-
-                error_text = str(exc)
-
-                log(
-                    f"Gemini {model_name} "
-                    f"attempt "
-                    f"{attempt}/{retries_per_model} "
-                    f"failed: "
-                    f"{error_text[:500]}"
-                )
-
-                # ------------------------------------------------
-                # 503 = model temporarily unavailable
-                # ------------------------------------------------
-
-                if is_service_unavailable(
-                    error_text
-                ):
-
-                    log(
-                        f"{model_name} is temporarily "
-                        f"unavailable. Switching to "
-                        f"next Gemini model..."
-                    )
-
-                    break
-
-                # ------------------------------------------------
-                # 429 / quota = switch model
-                # ------------------------------------------------
-
-                if is_quota_or_rate_limit(
-                    error_text
-                ):
-
-                    log(
-                        f"{model_name} hit a rate/quota "
-                        f"limit. Switching to next "
-                        f"Gemini model..."
-                    )
-
-                    break
-
-                # ------------------------------------------------
-                # Other errors
-                # ------------------------------------------------
-
-                if attempt < retries_per_model:
-
-                    wait_time = 3 * attempt
-
-                    log(
-                        f"Retrying {model_name} "
-                        f"in {wait_time}s..."
-                    )
-
-                    time.sleep(
-                        wait_time
-                    )
-
-        log(
-            f"Moving to next Gemini model..."
-        )
-
-    raise RuntimeError(
-        "All Gemini models failed. "
-        f"Last error: {last_error}"
-    )
-
-
-# ============================================================
-# TOPIC SELECTION
-# ============================================================
-
-def select_topic(
-    candidates: List[Dict[str, Any]],
-) -> Dict[str, Any]:
 
     if not candidates:
+        unused = [
+            item
+            for item in EVERGREEN_TOPICS
+            if item["key"] not in state.get("used_topic_keys", [])
+        ]
 
-        raise RuntimeError(
-            "No topic candidates available."
-        )
+        if not unused:
+            state["used_topic_keys"] = []
 
-    client = get_gemini_client()
+            unused = EVERGREEN_TOPICS.copy()
 
-    models = discover_gemini_models(
-        client
+        item = random.choice(unused)
+
+        return {
+            "source_id": f"evergreen:{item['key']}",
+            "type": "evergreen",
+            "category": item["category"],
+            "topic": item["topic"],
+            "angle": item["topic"],
+            "source_summary": item["topic"],
+            "topic_key": item["key"],
+        }
+
+    candidate_text = json.dumps(
+        candidates,
+        indent=2,
+        ensure_ascii=False,
     )
 
-    formatted = []
-
-    for index, candidate in enumerate(
-        candidates
-    ):
-
-        formatted.append(
-            {
-                "index": index,
-                **candidate,
-            }
-        )
-
     prompt = TOPIC_SELECTOR_PROMPT.format(
-        candidates=json.dumps(
-            formatted,
-            indent=2,
-            ensure_ascii=False,
-        )
+        candidates=candidate_text
     )
 
     raw = gemini_generate(
-        client,
-        models,
         prompt,
+        temperature=0.75,
     )
 
     result = safe_json_loads(raw)
 
+    selected_index = result.get("selected_index", 0)
+
     try:
-
-        index = int(
-            result.get(
-                "selected_index",
-                0,
-            )
-        )
-
+        selected_index = int(selected_index)
     except Exception:
+        selected_index = 0
 
-        index = 0
-
-    index = max(
+    selected_index = max(
         0,
         min(
-            index,
+            selected_index,
             len(candidates) - 1,
         ),
     )
 
-    selected = dict(
-        candidates[index]
+    selected = candidates[selected_index]
+
+    source_id = str(selected["source_id"])
+
+    topic_key = selected.get("key")
+
+    if not topic_key and selected["type"] == "evergreen":
+        topic_key = source_id.replace(
+            "evergreen:",
+            "",
+        )
+
+    topic = {
+        "source_id": source_id,
+        "type": selected["type"],
+        "category": selected.get(
+            "category",
+            "general",
+        ),
+        "topic": result.get(
+            "topic",
+            selected["topic"],
+        ),
+        "angle": result.get(
+            "angle",
+            selected["topic"],
+        ),
+        "source_summary": result.get(
+            "source_summary",
+            selected["topic"],
+        ),
+        "topic_key": topic_key,
+        "year": selected.get("year"),
+        "answer": selected.get("answer"),
+        "date": f"{today.month:02d}/{today.day:02d}",
+    }
+
+    print(
+        f"[SpaceFacts] Selected topic: {topic['topic']}"
     )
 
-    selected.update(
-        {
-            "topic": result.get(
-                "topic",
-                selected.get(
-                    "topic",
-                    "",
-                ),
-            ),
-            "category": result.get(
-                "category",
-                selected.get(
-                    "category",
-                    "general",
-                ),
-            ),
-            "angle": result.get(
-                "angle",
-                "",
-            ),
-            "source_summary": result.get(
-                "source_summary",
-                "",
-            ),
-        }
-    )
-
-    return selected
-
-
-def get_dynamic_topic(
-    state: Dict[str, Any],
-) -> Dict[str, Any]:
-
-    return select_topic(
-        build_candidates(state)
-    )
+    return topic
 
 
 # ============================================================
@@ -1346,66 +944,61 @@ def get_dynamic_topic(
 # ============================================================
 
 SCRIPT_PROMPT = """
-You write scripts for an addictive YouTube Shorts channel.
+You write scripts for a fast-paced YouTube Shorts channel.
 
-Create a factual 30–45 second story.
+Create a factual 30–45 second Short.
 
-TARGET:
-85–115 spoken words.
+TOPIC:
+{topic}
 
-STYLE:
-- Immediate hook.
-- Short sentences.
-- Natural spoken English.
-- Escalate the information.
-- Give a satisfying payoff.
-- End with a memorable final line.
-- Do not waste words introducing the topic.
+CATEGORY:
+{category}
 
-FACTUALITY:
-- Use only information supported by the supplied topic.
-- Do not invent statistics.
-- Do not invent quotations.
-- Do not create fake dialogue.
-- Do not claim uncertain information as fact.
-- Do not use conspiracy theories as facts.
-- Do not use political persuasion.
+ANGLE:
+{angle}
 
-VISUALS:
-The video will use Coverr stock footage.
+SOURCE BASIS:
+{source_summary}
 
-Create 3–5 visual search queries that describe footage
-that could visually accompany the story.
+SOURCE TYPE:
+{source_type}
 
-Search queries should be:
-- short
-- concrete
-- stock-footage friendly
-- 2–5 words
-- visually searchable
+Requirements:
 
-Examples:
-"construction machinery"
-"tower crane"
-"workers building"
+1. Narration must be 85–115 spoken words.
+2. Start immediately with a strong curiosity hook.
+3. Use short spoken sentences.
+4. No intro such as "Hey guys".
+5. No "welcome back".
+6. Explain the interesting part clearly.
+7. End with either:
+   - a loop,
+   - a question,
+   - or a punchline.
+8. Do not invent facts.
+9. Avoid unsupported superlatives.
+10. Keep it understandable for a general audience.
+11. The narration should sound natural when spoken by TTS.
+12. Generate 3–5 visual search queries suitable for stock footage.
+13. Captions should be short, punchy phrases of 2–5 words.
+14. Captions must be uppercase.
+15. Maximum 8 scenes.
 
-CAPTIONS:
-Every scene must have a caption.
-Captions should be 2–5 words.
-Maximum 6 words.
-Use uppercase.
+Each scene must contain:
+- narration
+- caption
 
-Return ONLY JSON in this exact structure:
+Return ONLY valid JSON:
 
 {{
-  "title": "under 60 characters",
-  "hook": "first narration sentence",
+  "title": "Short YouTube title",
+  "hook": "Opening hook",
   "ending_style": "loop",
   "footage_style": "construction",
   "visual_search_queries": [
-    "construction machinery",
-    "building site",
-    "tower crane"
+    "search query 1",
+    "search query 2",
+    "search query 3"
   ],
   "scenes": [
     {{
@@ -1418,150 +1011,88 @@ Return ONLY JSON in this exact structure:
     "#facts"
   ]
 }}
-
-ENDING_STYLE:
-Use one of:
-- "loop"
-- "question"
-- "punchline"
-
-FOOTAGE_STYLE:
-Choose one:
-- construction
-- machines
-- cars
-- nature
-- satisfying
-- sports
-- animation
-- ocean
-- aviation
-- general
-
-TOPIC:
-{topic}
-
-CATEGORY:
-{category}
-
-ANGLE:
-{angle}
-
-SOURCE SUMMARY:
-{source_summary}
 """
 
 
-def generate_script(
-    topic_data: Dict[str, Any],
-) -> Dict[str, Any]:
+def validate_script(script):
+    if not isinstance(script, dict):
+        raise ValueError("Script is not a JSON object.")
 
-    client = get_gemini_client()
-
-    models = discover_gemini_models(
-        client
-    )
-
-    prompt = SCRIPT_PROMPT.format(
-        topic=topic_data.get(
-            "topic",
-            "",
-        ),
-        category=topic_data.get(
-            "category",
-            "general",
-        ),
-        angle=topic_data.get(
-            "angle",
-            "",
-        ),
-        source_summary=topic_data.get(
-            "source_summary",
-            "",
-        ),
-    )
-
-    raw = gemini_generate(
-        client,
-        models,
-        prompt,
-    )
-
-    script = safe_json_loads(raw)
-
-    validate_script(script)
-
-    return script
-
-
-def validate_script(
-    script: Dict[str, Any],
-) -> None:
-
-    required = [
-        "title",
-        "hook",
-        "scenes",
-        "hashtags",
-    ]
-
-    for key in required:
-
-        if key not in script:
-
-            raise ValueError(
-                f"Script missing: {key}"
-            )
-
-    title = clean_text(
-        script["title"]
-    )
+    title = clean_text(script.get("title"))
 
     if not title:
-
-        raise ValueError(
-            "Empty title."
-        )
+        raise ValueError("Script title is empty.")
 
     if len(title) > 60:
+        title = title[:57].rstrip() + "..."
 
-        script["title"] = (
-            title[:57] + "..."
-        )
+    script["title"] = title
 
-    scenes = script.get(
-        "scenes",
-        [],
-    )
+    scenes = script.get("scenes")
 
-    if not isinstance(
-        scenes,
-        list,
-    ):
-
-        raise ValueError(
-            "Scenes must be a list."
-        )
+    if not isinstance(scenes, list):
+        raise ValueError("Scenes must be a list.")
 
     if not scenes:
+        raise ValueError("No scenes generated.")
 
-        raise ValueError(
-            "No scenes generated."
+    if len(scenes) > MAX_SCENES:
+        script["scenes"] = scenes[:MAX_SCENES]
+
+    total_words = 0
+
+    cleaned_scenes = []
+
+    for scene in script["scenes"]:
+        narration = clean_text(
+            scene.get("narration")
         )
 
-    script["scenes"] = scenes[
-        :MAX_SCENES
-    ]
+        caption = clean_text(
+            scene.get("caption")
+        ).upper()
+
+        if not narration:
+            continue
+
+        caption_words = caption.split()
+
+        if len(caption_words) > 6:
+            caption = " ".join(
+                caption_words[:6]
+            )
+
+        total_words += len(
+            narration.split()
+        )
+
+        cleaned_scenes.append({
+            "narration": narration,
+            "caption": caption,
+        })
+
+    if not cleaned_scenes:
+        raise ValueError("All scenes were empty.")
+
+    script["scenes"] = cleaned_scenes
+
+    if total_words < 70:
+        raise ValueError(
+            f"Generated narration is too short: "
+            f"{total_words} words."
+        )
+
+    if total_words > 140:
+        raise ValueError(
+            f"Generated narration is too long: "
+            f"{total_words} words."
+        )
 
     footage_style = clean_text(
-        script.get(
-            "footage_style",
-            "general",
-        )
+        script.get("footage_style")
     ).lower()
 
     if footage_style not in FOOTAGE_STYLES:
-
         footage_style = "general"
 
     script["footage_style"] = footage_style
@@ -1571,91 +1102,42 @@ def validate_script(
         [],
     )
 
-    if not isinstance(
-        queries,
-        list,
-    ):
-
+    if not isinstance(queries, list):
         queries = []
 
     queries = [
-        clean_text(item)
-        for item in queries
-        if clean_text(item)
+        clean_text(q)
+        for q in queries
+        if clean_text(q)
     ]
+
+    queries = queries[:5]
 
     if not queries:
-
         queries = [
             footage_style,
-            "interesting footage",
-            "cinematic b roll",
+            "interesting technology",
+            "modern architecture",
         ]
 
-    script["visual_search_queries"] = queries[
-        :5
-    ]
+    script["visual_search_queries"] = queries
 
-    for scene in script["scenes"]:
+    ending_style = clean_text(
+        script.get("ending_style")
+    ).lower()
 
-        if not isinstance(
-            scene,
-            dict,
-        ):
+    if ending_style not in [
+        "loop",
+        "question",
+        "punchline",
+    ]:
+        ending_style = "loop"
 
-            raise ValueError(
-                "Invalid scene object."
-            )
+    script["ending_style"] = ending_style
 
-        narration = clean_text(
-            scene.get(
-                "narration",
-                "",
-            )
-        )
+    hashtags = script.get("hashtags", [])
 
-        caption = clean_text(
-            scene.get(
-                "caption",
-                "",
-            )
-        )
-
-        if not narration:
-
-            raise ValueError(
-                "Scene has empty narration."
-            )
-
-        if not caption:
-
-            caption = " ".join(
-                narration.split()[:4]
-            )
-
-        caption = caption.upper()
-
-        if len(
-            caption.split()
-        ) > 6:
-
-            caption = " ".join(
-                caption.split()[:6]
-            )
-
-        scene["narration"] = narration
-        scene["caption"] = caption
-
-    hashtags = script.get(
-        "hashtags",
-        [],
-    )
-
-    if not isinstance(
-        hashtags,
-        list,
-    ):
-
+    if not isinstance(hashtags, list):
         hashtags = []
 
     hashtags = [
@@ -1664,377 +1146,144 @@ def validate_script(
         if clean_text(tag)
     ]
 
-    existing = [
-        tag.lower()
-        for tag in hashtags
-    ]
+    if "#shorts" not in [
+        x.lower() for x in hashtags
+    ]:
+        hashtags.insert(0, "#shorts")
 
-    if "#shorts" not in existing:
+    if "#facts" not in [
+        x.lower() for x in hashtags
+    ]:
+        hashtags.append("#facts")
 
-        hashtags.insert(
-            0,
-            "#shorts",
-        )
+    script["hashtags"] = hashtags[:8]
 
-    script["hashtags"] = hashtags[
-        :8
-    ]
-
-    ending_style = clean_text(
-        script.get(
-            "ending_style",
-            "loop",
-        )
-    ).lower()
-
-    if ending_style not in {
-        "loop",
-        "question",
-        "punchline",
-    }:
-
-        ending_style = "loop"
-
-    script["ending_style"] = ending_style
+    return script
 
 
-def total_narration_words(
-    script: Dict[str, Any],
-) -> int:
+def generate_script(topic):
+    print("[SpaceFacts] Generating Shorts script...")
 
-    text = " ".join(
-        scene["narration"]
+    prompt = SCRIPT_PROMPT.format(
+        topic=topic["topic"],
+        category=topic.get("category", "general"),
+        angle=topic.get("angle", topic["topic"]),
+        source_summary=topic.get(
+            "source_summary",
+            "",
+        ),
+        source_type=topic.get(
+            "type",
+            "evergreen",
+        ),
+    )
+
+    raw = gemini_generate(
+        prompt,
+        temperature=0.85,
+    )
+
+    script = safe_json_loads(raw)
+
+    script = validate_script(script)
+
+    word_count = sum(
+        len(scene["narration"].split())
         for scene in script["scenes"]
     )
 
-    return len(
-        text.split()
+    print(
+        f"[SpaceFacts] Generated {word_count} narration words."
     )
 
+    print(
+        f"[SpaceFacts] Title: {script['title']}"
+    )
+
+    print(
+        "[SpaceFacts] Visual queries: "
+        + ", ".join(
+            script["visual_search_queries"]
+        )
+    )
+
+    return script
+
 
 # ============================================================
-# TTS
+# EDGE TTS
 # ============================================================
 
-def synthesize_scene_audio(
-    narration: str,
-    output_path: Path,
-) -> None:
-
-    import asyncio
+async def synthesize_tts_async(text, output_path):
     import edge_tts
 
-    async def generate():
+    communicate = edge_tts.Communicate(
+        text=text,
+        voice=TTS_VOICE,
+        rate="+2%",
+        pitch="+0Hz",
+    )
 
-        communicate = edge_tts.Communicate(
-            narration,
-            TTS_VOICE,
-            rate="+2%",
-            pitch="+0Hz",
-        )
+    await communicate.save(str(output_path))
 
-        await communicate.save(
-            str(output_path)
-        )
+
+def synthesize_tts(text, output_path):
+    import asyncio
 
     asyncio.run(
-        generate()
+        synthesize_tts_async(
+            text,
+            output_path,
+        )
     )
 
 
-def synthesize_all_audio(
-    script: Dict[str, Any],
-    run_dir: Path,
-) -> Tuple[List[Path], float]:
-
-    audio_dir = run_dir / "audio"
-
-    audio_dir.mkdir(
+def generate_scene_audio(scenes, work_dir):
+    work_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    paths = []
+    audio_files = []
 
-    scenes = script["scenes"]
-
-    for index, scene in enumerate(
-        scenes
-    ):
-
-        path = (
-            audio_dir
-            / f"scene_{index:02d}.mp3"
-        )
-
-        log(
-            f"Synthesizing scene "
+    for index, scene in enumerate(scenes):
+        print(
+            f"[SpaceFacts] Synthesizing scene "
             f"{index + 1}/{len(scenes)}"
         )
 
-        synthesize_scene_audio(
+        output = (
+            work_dir
+            / f"scene_{index + 1:02d}.mp3"
+        )
+
+        synthesize_tts(
             scene["narration"],
-            path,
+            output,
         )
 
-        paths.append(path)
+        audio_files.append(output)
 
-    clips = []
-
-    try:
-
-        for path in paths:
-
-            clips.append(
-                AudioFileClip(
-                    str(path)
-                )
-            )
-
-        total_duration = sum(
-            clip.duration
-            for clip in clips
-        )
-
-    finally:
-
-        for clip in clips:
-
-            try:
-                clip.close()
-            except Exception:
-                pass
-
-    return paths, total_duration
-
-
-def concatenate_audio(
-    clips: List[AudioFileClip],
-):
-
-    if not clips:
-
-        raise RuntimeError(
-            "No audio clips."
-        )
-
-    if len(clips) == 1:
-
-        return clips[0]
-
-    current_time = 0.0
-    pieces = []
-
-    for clip in clips:
-
-        pieces.append(
-            clip.set_start(
-                current_time
-            )
-        )
-
-        current_time += clip.duration
-
-    return CompositeAudioClip(
-        pieces
-    )
+    return audio_files
 
 
 # ============================================================
-# COVERR API
+# COVERR
 # ============================================================
 
-def coverr_headers() -> Dict[str, str]:
-
+def coverr_headers():
     return {
         "x-api-key": COVERR_API_KEY,
         "Accept": "application/json",
-        "User-Agent":
-            "SpaceFactsPipeline/9.2",
+        "User-Agent": "SpaceFactsPipeline/9.3",
     }
 
 
-def search_coverr_videos(
-    query: str,
-    limit: int = 10,
-) -> List[Dict[str, Any]]:
-
-    query = clean_text(query)
-
-    if not query:
-        return []
-
-    params = {
-        "query": query,
-        "page_size": min(
-            max(limit, 1),
-            20,
-        ),
-    }
-
-    try:
-
-        response = requests.get(
-            COVERR_API_URL,
-            params=params,
-            headers=coverr_headers(),
-            timeout=REQUEST_TIMEOUT,
-        )
-
-        if response.status_code == 401:
-
-            log(
-                "Coverr authentication failed. "
-                "Check COVERR_API_KEY."
-            )
-
-            return []
-
-        if response.status_code == 429:
-
-            log(
-                "Coverr rate limit reached."
-            )
-
-            return []
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        hits = data.get(
-            "hits",
-            [],
-        )
-
-        if not isinstance(
-            hits,
-            list,
-        ):
-
-            return []
-
-        return hits
-
-    except Exception as exc:
-
-        log(
-            f"Coverr search failed for "
-            f"'{query}': {exc}"
-        )
-
-        return []
-
-
-def get_coverr_video_details(
-    video_id: str,
-) -> Dict[str, Any]:
-
-    if not video_id:
-        return {}
-
-    url = (
-        f"https://api.coverr.co/videos/"
-        f"{video_id}"
-    )
-
-    try:
-
-        response = requests.get(
-            url,
-            headers=coverr_headers(),
-            timeout=REQUEST_TIMEOUT,
-        )
-
-        if response.status_code != 200:
-            return {}
-
-        data = response.json()
-
-        if not isinstance(
-            data,
-            dict,
-        ):
-
-            return {}
-
-        if isinstance(
-            data.get("video"),
-            dict,
-        ):
-
-            return data["video"]
-
-        return data
-
-    except Exception as exc:
-
-        log(
-            f"Coverr detail lookup failed: "
-            f"{exc}"
-        )
-
-        return {}
-
-
-def recursive_urls(
-    value: Any,
-) -> List[str]:
-
-    found = []
-
-    if isinstance(
-        value,
-        str,
-    ):
-
-        lower = value.lower()
-
-        if (
-            lower.startswith("http://")
-            or lower.startswith("https://")
-        ):
-
-            found.append(value)
-
-        return found
-
-    if isinstance(
-        value,
-        dict,
-    ):
-
-        for key, child in value.items():
-
-            if "thumbnail" in str(
-                key
-            ).lower():
-
-                continue
-
-            found.extend(
-                recursive_urls(child)
-            )
-
-        return found
-
-    if isinstance(
-        value,
-        list,
-    ):
-
-        for child in value:
-
-            found.extend(
-                recursive_urls(child)
-            )
-
-    return found
-
-
-def choose_media_url(
-    video: Dict[str, Any],
-) -> Optional[str]:
+def recursive_find_url(obj):
+    """
+    Recursively search a Coverr API response for a likely
+    downloadable video URL.
+    """
 
     preferred_keys = [
         "download_url",
@@ -2047,392 +1296,323 @@ def choose_media_url(
         "url",
     ]
 
-    def search_dict(
-        obj: Any,
-    ) -> Optional[str]:
+    if isinstance(obj, dict):
 
-        if isinstance(
-            obj,
-            dict,
-        ):
+        for key in preferred_keys:
+            value = obj.get(key)
 
-            for key in preferred_keys:
-
-                value = obj.get(key)
-
-                if not isinstance(
-                    value,
-                    str,
-                ):
-
-                    continue
-
-                low = value.lower()
-
-                if not (
-                    low.startswith("http://")
-                    or low.startswith("https://")
-                ):
-
-                    continue
+            if isinstance(value, str):
+                lowered = value.lower()
 
                 if (
-                    ".mp4" in low
-                    or ".webm" in low
-                    or ".mov" in low
-                    or "video" in low
-                    or "cdn" in low
-                    or "download" in low
+                    lowered.startswith("http://")
+                    or lowered.startswith("https://")
                 ):
-
                     return value
 
-            for child in obj.values():
+        for value in obj.values():
+            found = recursive_find_url(value)
 
-                result = search_dict(
-                    child
-                )
+            if found:
+                return found
 
-                if result:
-                    return result
+    elif isinstance(obj, list):
 
-        elif isinstance(
-            obj,
-            list,
-        ):
+        for value in obj:
+            found = recursive_find_url(value)
 
-            for child in obj:
-
-                result = search_dict(
-                    child
-                )
-
-                if result:
-                    return result
-
-        return None
-
-    result = search_dict(video)
-
-    if result:
-        return result
-
-    urls = recursive_urls(
-        video
-    )
-
-    for url in urls:
-
-        lower = url.lower()
-
-        if (
-            ".mp4" in lower
-            or ".webm" in lower
-            or ".mov" in lower
-            or "video" in lower
-            or "download" in lower
-        ):
-
-            return url
+            if found:
+                return found
 
     return None
 
 
-def get_coverr_video_url(
-    video: Dict[str, Any],
-) -> Optional[str]:
+def extract_coverr_videos(data):
+    if not isinstance(data, dict):
+        return []
 
-    direct = choose_media_url(
-        video
+    possible_keys = [
+        "videos",
+        "results",
+        "data",
+        "items",
+    ]
+
+    for key in possible_keys:
+        value = data.get(key)
+
+        if isinstance(value, list):
+            return value
+
+    return []
+
+
+def coverr_search(query, limit=10):
+    if not COVERR_API_KEY:
+        print(
+            "[SpaceFacts] COVERR_API_KEY is missing."
+        )
+        return []
+
+    params = {
+        "query": query,
+        "page_size": min(
+            max(limit, 1),
+            20,
+        ),
+    }
+
+    try:
+        response = requests.get(
+            COVERR_API_URL,
+            headers=coverr_headers(),
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
+
+        if response.status_code in [401, 403]:
+            print(
+                "[SpaceFacts] Coverr authentication failed. "
+                "Check COVERR_API_KEY."
+            )
+            return []
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        return extract_coverr_videos(data)
+
+    except Exception as e:
+        print(
+            f"[SpaceFacts] Coverr search failed for "
+            f"'{query}': {e}"
+        )
+        return []
+
+
+def coverr_detail(video_id):
+    if not video_id:
+        return {}
+
+    url = (
+        f"https://api.coverr.co/videos/"
+        f"{quote(str(video_id), safe='')}"
     )
+
+    try:
+        response = requests.get(
+            url,
+            headers=coverr_headers(),
+            timeout=REQUEST_TIMEOUT,
+        )
+
+        if response.status_code in [401, 403]:
+            print(
+                "[SpaceFacts] Coverr authentication failed "
+                "while fetching video details."
+            )
+            return {}
+
+        response.raise_for_status()
+
+        return response.json()
+
+    except Exception as e:
+        print(
+            f"[SpaceFacts] Coverr detail request failed: {e}"
+        )
+        return {}
+
+
+def get_coverr_id(item):
+    if not isinstance(item, dict):
+        return None
+
+    for key in [
+        "id",
+        "video_id",
+        "videoId",
+        "uuid",
+    ]:
+        value = item.get(key)
+
+        if value is not None:
+            return str(value)
+
+    return None
+
+
+def get_coverr_media_url(item):
+    if not isinstance(item, dict):
+        return None
+
+    direct = recursive_find_url(item)
 
     if direct:
         return direct
 
-    video_id = str(
-        video.get(
-            "id",
-            "",
-        )
-    )
+    video_id = get_coverr_id(item)
 
-    if not video_id:
-        return None
+    if video_id:
+        detail = coverr_detail(video_id)
 
-    details = get_coverr_video_details(
-        video_id
-    )
+        if detail:
+            direct = recursive_find_url(detail)
 
-    if details:
-
-        return choose_media_url(
-            details
-        )
+            if direct:
+                return direct
 
     return None
 
 
-def download_coverr_video(
-    video: Dict[str, Any],
-) -> Optional[Path]:
-
-    video_id = str(
-        video.get(
-            "id",
-            "",
-        )
-    )
+def download_coverr_video(item):
+    video_id = get_coverr_id(item)
 
     if not video_id:
-        return None
+        video_id = hash_text(
+            json.dumps(
+                item,
+                sort_keys=True,
+                default=str,
+            )
+        )
 
-    safe_id = slugify(
-        video_id
+    filename = (
+        f"coverr_{slugify(video_id)}.mp4"
     )
 
-    output_path = (
+    destination = (
         COVERR_DOWNLOAD_DIR
-        / f"coverr_{safe_id}.mp4"
+        / filename
     )
 
-    if (
-        output_path.exists()
-        and output_path.stat().st_size > 100_000
-    ):
+    if destination.exists() and destination.stat().st_size > 10000:
+        return destination
 
-        log(
-            f"Using cached Coverr clip: "
-            f"{output_path.name}"
-        )
+    media_url = get_coverr_media_url(item)
 
-        return output_path
-
-    url = get_coverr_video_url(
-        video
-    )
-
-    if not url:
-
-        log(
-            f"No downloadable media URL "
-            f"found for Coverr video "
-            f"{video_id}"
-        )
-
+    if not media_url:
         return None
 
-    temp_path = output_path.with_suffix(
-        ".download"
+    print(
+        f"[SpaceFacts] Downloading Coverr clip "
+        f"{video_id}..."
+    )
+
+    temp_path = destination.with_suffix(
+        ".tmp"
     )
 
     try:
-
-        log(
-            f"Downloading Coverr clip: "
-            f"{video.get('title', video_id)}"
-        )
-
         with requests.get(
-            url,
-            headers={
-                "User-Agent":
-                    "SpaceFactsPipeline/9.2"
-            },
+            media_url,
             stream=True,
             timeout=REQUEST_TIMEOUT,
+            headers={
+                "User-Agent": "SpaceFactsPipeline/9.3"
+            },
         ) as response:
 
             response.raise_for_status()
 
-            with open(
-                temp_path,
-                "wb",
-            ) as file:
-
+            with open(temp_path, "wb") as f:
                 for chunk in response.iter_content(
                     chunk_size=1024 * 1024
                 ):
-
                     if chunk:
-                        file.write(chunk)
+                        f.write(chunk)
 
         if (
             not temp_path.exists()
-            or temp_path.stat().st_size < 100_000
+            or temp_path.stat().st_size < 10000
         ):
-
-            raise RuntimeError(
-                "Downloaded file is too small."
-            )
-
-        temp_path.replace(
-            output_path
-        )
-
-        return output_path
-
-    except Exception as exc:
-
-        log(
-            f"Coverr download failed: "
-            f"{exc}"
-        )
-
-        try:
-
             temp_path.unlink(
                 missing_ok=True
             )
+            return None
 
-        except Exception:
-            pass
+        temp_path.replace(destination)
+
+        return destination
+
+    except Exception as e:
+        print(
+            f"[SpaceFacts] Coverr download failed: {e}"
+        )
+
+        temp_path.unlink(
+            missing_ok=True
+        )
 
         return None
 
 
-def coverr_source_id(
-    video: Dict[str, Any],
-) -> str:
+def select_coverr_clips(
+    queries,
+    required_count,
+    state,
+):
+    if not COVERR_API_KEY:
+        return []
 
-    return (
-        "coverr-"
-        + str(
-            video.get(
-                "id",
-                "",
-            )
-        )
+    print(
+        f"[SpaceFacts] Searching Coverr for "
+        f"{required_count} clips..."
     )
 
-
-def select_coverr_clips(
-    queries: List[str],
-    state: Dict[str, Any],
-    number_of_clips: int,
-) -> List[Dict[str, Any]]:
-
-    used_sources = set(
-        state.get(
+    used_source_ids = set(
+        str(x)
+        for x in state.get(
             "used_source_ids",
             [],
         )
     )
 
-    candidates = []
+    selected = []
     seen_ids = set()
 
     for query in queries:
 
-        results = search_coverr_videos(
+        if len(selected) >= required_count:
+            break
+
+        results = coverr_search(
             query,
             limit=10,
         )
 
-        random.shuffle(
-            results
-        )
+        for item in results:
 
-        for video in results:
+            if len(selected) >= required_count:
+                break
 
-            video_id = str(
-                video.get(
-                    "id",
-                    "",
-                )
-            )
+            video_id = get_coverr_id(item)
 
             if not video_id:
                 continue
 
-            source_id = coverr_source_id(
-                video
-            )
-
-            if source_id in used_sources:
-                continue
+            video_id = str(video_id)
 
             if video_id in seen_ids:
                 continue
 
-            seen_ids.add(
-                video_id
-            )
+            if video_id in used_source_ids:
+                continue
 
-            item = dict(
-                video
-            )
+            seen_ids.add(video_id)
 
-            item["_query"] = query
+            path = download_coverr_video(item)
 
-            candidates.append(
-                item
-            )
+            if not path:
+                continue
 
-    if not candidates:
-        return []
-
-    vertical = [
-        item
-        for item in candidates
-        if item.get(
-            "is_vertical",
-            False,
-        )
-    ]
-
-    horizontal = [
-        item
-        for item in candidates
-        if not item.get(
-            "is_vertical",
-            False,
-        )
-    ]
-
-    ordered = vertical + horizontal
-
-    selected = []
-
-    for candidate in ordered:
-
-        if len(
-            selected
-        ) >= number_of_clips:
-
-            break
-
-        path = download_coverr_video(
-            candidate
-        )
-
-        if not path:
-            continue
-
-        selected.append(
-            {
-                "path": str(path),
-                "provider": "Coverr",
-                "source_id":
-                    coverr_source_id(
-                        candidate
-                    ),
-                "source_url":
-                    candidate.get(
-                        "url",
-                        COVERR_BASE_URL,
-                    ),
-                "query":
-                    candidate.get(
-                        "_query",
-                        "",
-                    ),
-                "title":
-                    candidate.get(
-                        "title",
-                        "",
-                    ),
-            }
-        )
+            selected.append({
+                "path": path,
+                "source_id": video_id,
+                "source": "coverr",
+                "query": query,
+            })
 
     return selected
 
@@ -2449,420 +1629,301 @@ VIDEO_EXTENSIONS = {
 }
 
 
-def get_footage_root() -> Path:
-
+def get_footage_root():
     if FOOTAGE_DIR.exists():
         return FOOTAGE_DIR
 
     if GAMEPLAY_DIR.exists():
         return GAMEPLAY_DIR
 
-    return FOOTAGE_DIR
+    return None
 
 
-def get_footage_files() -> List[Path]:
-
+def list_local_footage():
     root = get_footage_root()
 
-    if not root.exists():
+    if not root:
         return []
 
-    return [
-        path
-        for path in root.rglob("*")
+    files = []
+
+    for path in root.rglob("*"):
         if (
             path.is_file()
             and path.suffix.lower()
             in VIDEO_EXTENSIONS
-        )
-    ]
+        ):
+            files.append(path)
+
+    return files
 
 
-def detect_footage_style(
-    path: Path,
-) -> str:
+def score_local_footage(
+    path,
+    style,
+):
+    path_text = str(path).lower()
 
-    lower = str(path).lower()
+    score = 0
 
-    for style in FOOTAGE_STYLES:
+    if style and style in path_text:
+        score += 10
 
-        if style in lower:
-            return style
+    keywords = {
+        "construction": [
+            "construction",
+            "building",
+            "crane",
+            "concrete",
+        ],
+        "machines": [
+            "machine",
+            "machinery",
+            "factory",
+            "engine",
+        ],
+        "cars": [
+            "car",
+            "vehicle",
+            "driving",
+            "race",
+        ],
+        "nature": [
+            "nature",
+            "forest",
+            "mountain",
+            "animal",
+        ],
+        "satisfying": [
+            "satisfying",
+            "oddly",
+            "clean",
+            "asmr",
+        ],
+        "sports": [
+            "sport",
+            "football",
+            "basketball",
+            "running",
+        ],
+        "animation": [
+            "animation",
+            "animated",
+            "cgi",
+        ],
+        "ocean": [
+            "ocean",
+            "sea",
+            "underwater",
+            "water",
+        ],
+        "aviation": [
+            "airplane",
+            "aircraft",
+            "aviation",
+            "jet",
+        ],
+    }
 
-    return "general"
+    for keyword in keywords.get(style, []):
+        if keyword in path_text:
+            score += 3
+
+    return score
 
 
 def select_local_footage(
-    style: str,
-    state: Dict[str, Any],
-    number_of_clips: int,
-) -> List[Dict[str, Any]]:
-
-    files = get_footage_files()
+    style,
+    count,
+    state,
+):
+    files = list_local_footage()
 
     if not files:
         return []
 
-    preferred = [
-        path
-        for path in files
-        if detect_footage_style(path)
-        == style
-    ]
-
-    general = [
-        path
-        for path in files
-        if path not in preferred
-    ]
-
-    pool = preferred + general
-
     used = set(
-        state.get(
+        str(x)
+        for x in state.get(
             "used_gameplay",
             [],
         )
     )
 
-    random.shuffle(
-        pool
+    ranked = sorted(
+        files,
+        key=lambda p: score_local_footage(
+            p,
+            style,
+        ),
+        reverse=True,
     )
 
-    selected = []
+    unused = [
+        path
+        for path in ranked
+        if str(path) not in used
+    ]
 
-    for path in pool:
+    if not unused:
+        # Reset local usage when every file has been used.
+        state["used_gameplay"] = []
+        unused = ranked
 
-        if len(
-            selected
-        ) >= number_of_clips:
+    selected = unused[:count]
 
-            break
-
-        path_str = str(path)
-
-        if path_str in used:
-            continue
-
-        selected.append(
-            {
-                "path": path_str,
-                "provider": "Local",
-                "source_id": "",
-                "source_url": "",
-                "query": style,
-                "title": path.name,
-            }
-        )
-
-    if not selected and pool:
-
-        for path in pool[
-            :number_of_clips
-        ]:
-
-            selected.append(
-                {
-                    "path": str(path),
-                    "provider": "Local",
-                    "source_id": "",
-                    "source_url": "",
-                    "query": style,
-                    "title": path.name,
-                }
-            )
-
-    return selected
+    return [
+        {
+            "path": path,
+            "source_id": f"local:{hash_text(str(path))}",
+            "source": "local",
+            "query": style,
+        }
+        for path in selected
+    ]
 
 
 def select_footage(
-    style: str,
-    visual_search_queries: List[str],
-    state: Dict[str, Any],
-    number_of_clips: int,
-) -> List[Dict[str, Any]]:
-
-    queries = list(
-        visual_search_queries
+    script,
+    state,
+):
+    queries = script.get(
+        "visual_search_queries",
+        [],
     )
 
-    if not queries:
-
-        queries = [
-            style,
-            "cinematic footage",
-            "interesting footage",
-        ]
-
-    queries = queries[:5]
-
-    log(
-        f"Searching Coverr for "
-        f"{number_of_clips} clips..."
+    scene_count = len(
+        script.get("scenes", [])
     )
 
-    clips = select_coverr_clips(
+    required_count = min(
+        max(3, scene_count),
+        5,
+    )
+
+    coverr_clips = select_coverr_clips(
         queries,
+        required_count,
         state,
-        number_of_clips,
     )
 
-    if len(
-        clips
-    ) >= number_of_clips:
-
-        log(
-            f"Found {len(clips)} Coverr clips."
+    if coverr_clips:
+        print(
+            f"[SpaceFacts] Coverr provided "
+            f"{len(coverr_clips)} clips."
         )
 
-        return clips
+    if len(coverr_clips) < required_count:
 
-    log(
-        f"Coverr only returned "
-        f"{len(clips)} clips. "
-        f"Trying local fallback."
-    )
-
-    local = select_local_footage(
-        style,
-        state,
-        number_of_clips - len(clips),
-    )
-
-    return clips + local
-
-
-# ============================================================
-# VIDEO PREPARATION
-# ============================================================
-
-def crop_to_vertical(
-    clip: VideoFileClip,
-):
-
-    width = clip.w
-    height = clip.h
-
-    target_ratio = VIDEO_W / VIDEO_H
-
-    if not height:
-        return clip
-
-    source_ratio = width / height
-
-    if source_ratio > target_ratio:
-
-        new_width = int(
-            height * target_ratio
+        print(
+            f"[SpaceFacts] Coverr only returned "
+            f"{len(coverr_clips)} clips. "
+            f"Trying local fallback."
         )
 
-        x1 = max(
-            0,
-            int(
-                (width - new_width)
-                / 2
+        needed = (
+            required_count
+            - len(coverr_clips)
+        )
+
+        local_clips = select_local_footage(
+            script.get(
+                "footage_style",
+                "general",
             ),
+            needed,
+            state,
         )
 
-        return clip.crop(
-            x1=x1,
-            x2=x1 + new_width,
+        coverr_clips.extend(
+            local_clips
         )
 
-    new_height = int(
-        width / target_ratio
-    )
-
-    y1 = max(
-        0,
-        int(
-            (height - new_height)
-            / 2
-        ),
-    )
-
-    return clip.crop(
-        y1=y1,
-        y2=y1 + new_height,
-    )
-
-
-def prepare_footage_clip(
-    path: str,
-    duration: float,
-):
-
-    clip = VideoFileClip(
-        path
-    )
-
-    if clip.duration <= 0:
-
-        clip.close()
-
+    if not coverr_clips:
         raise RuntimeError(
-            f"Invalid video duration: {path}"
+            "No footage available. "
+            "Add footage to the footage/ folder "
+            "or fix COVERR_API_KEY."
         )
 
-    if clip.duration >= duration:
-
-        max_start = max(
-            0,
-            clip.duration - duration,
-        )
-
-        start = (
-            random.uniform(
-                0,
-                max_start,
-            )
-            if max_start > 0
-            else 0
-        )
-
-        prepared = clip.subclip(
-            start,
-            start + duration,
-        )
-
-    else:
-
-        repeats = (
-            int(
-                duration / clip.duration
-            )
-            + 1
-        )
-
-        pieces = [
-            clip.copy()
-            for _ in range(repeats)
-        ]
-
-        prepared = concatenate_videoclips(
-            pieces,
-            method="compose",
-        ).subclip(
-            0,
-            duration,
-        )
-
-        try:
-            clip.close()
-        except Exception:
-            pass
-
-    prepared = crop_to_vertical(
-        prepared
+    print(
+        f"[SpaceFacts] Using "
+        f"{len(coverr_clips)} footage clips."
     )
 
-    prepared = prepared.resize(
-        newsize=(
-            VIDEO_W,
-            VIDEO_H,
-        )
-    )
-
-    return prepared.set_duration(
-        duration
-    )
+    return coverr_clips
 
 
 # ============================================================
-# CAPTIONS
+# CAPTION IMAGE
 # ============================================================
-
-def get_caption_font(
-    size: int = 82,
-):
-
-    return ImageFont.truetype(
-        CAPTION_FONT_PATH,
-        size=size,
-    )
-
 
 def make_caption_image(
-    text: str,
-    width: int = 920,
-    height: int = 320,
-    font_size: int = 82,
-) -> Image.Image:
+    text,
+    output_path,
+):
+    from PIL import ImageDraw, ImageFont
 
     image = Image.new(
         "RGBA",
-        (
-            width,
-            height,
-        ),
-        (
-            0,
-            0,
-            0,
-            0,
-        ),
+        (VIDEO_W, 300),
+        (0, 0, 0, 0),
     )
 
-    draw = ImageDraw.Draw(
-        image
-    )
+    draw = ImageDraw.Draw(image)
 
-    font = get_caption_font(
-        font_size
-    )
+    try:
+        font = ImageFont.truetype(
+            CAPTION_FONT_PATH,
+            82,
+        )
+    except Exception:
+        font = ImageFont.load_default()
 
-    words = text.upper().split()
+    text = text.upper()
 
+    max_width = VIDEO_W - 120
+
+    # Wrap caption manually
+    words = text.split()
     lines = []
     current = ""
 
     for word in words:
-
         test = (
-            word
-            if not current
-            else current + " " + word
+            f"{current} {word}"
+            if current
+            else word
         )
 
         bbox = draw.textbbox(
             (0, 0),
             test,
             font=font,
-            stroke_width=5,
+            stroke_width=3,
         )
 
-        if (
-            bbox[2] - bbox[0]
-            <= width - 50
-        ):
-
+        if bbox[2] <= max_width:
             current = test
-
         else:
-
             if current:
-                lines.append(
-                    current
-                )
+                lines.append(current)
 
             current = word
 
     if current:
-        lines.append(
-            current
-        )
+        lines.append(current)
 
     lines = lines[:3]
 
     line_heights = []
 
     for line in lines:
-
         bbox = draw.textbbox(
             (0, 0),
             line,
             font=font,
-            stroke_width=5,
+            stroke_width=3,
         )
 
         line_heights.append(
@@ -2871,33 +1932,29 @@ def make_caption_image(
 
     total_height = (
         sum(line_heights)
-        + max(
-            0,
-            len(lines) - 1,
-        ) * 12
+        + max(0, len(lines) - 1) * 12
     )
 
     y = (
-        height - total_height
-    ) / 2
+        150
+        - total_height / 2
+    )
 
-    for index, line in enumerate(
-        lines
+    for line, height in zip(
+        lines,
+        line_heights,
     ):
-
         bbox = draw.textbbox(
             (0, 0),
             line,
             font=font,
-            stroke_width=6,
+            stroke_width=3,
         )
 
-        text_width = (
-            bbox[2] - bbox[0]
-        )
+        width = bbox[2] - bbox[0]
 
         x = (
-            width - text_width
+            VIDEO_W - width
         ) / 2
 
         draw.text(
@@ -2905,989 +1962,883 @@ def make_caption_image(
             line,
             font=font,
             fill="white",
-            stroke_width=6,
+            stroke_width=8,
             stroke_fill="black",
         )
 
-        y += (
-            line_heights[index]
-            + 12
+        y += height + 12
+
+    image.save(
+        output_path,
+        "PNG",
+    )
+
+
+# ============================================================
+# VIDEO FOOTAGE PREPARATION
+# ============================================================
+
+def prepare_footage_clip(
+    path,
+    duration,
+):
+    clip = VideoFileClip(
+        str(path)
+    )
+
+    # Remove audio from stock footage.
+    # Narration is the primary audio.
+    try:
+        clip = clip.without_audio()
+    except Exception:
+        pass
+
+    if clip.duration <= 0:
+        raise ValueError(
+            f"Invalid footage duration: {path}"
         )
 
-    return image
+    # If source clip is shorter than requested,
+    # loop it.
+    if clip.duration < duration:
+
+        repeats = int(
+            duration / clip.duration
+        ) + 1
+
+        copies = []
+
+        for _ in range(repeats):
+            copies.append(
+                clip.copy()
+            )
+
+        prepared = concatenate_videoclips(
+            copies,
+            method="compose",
+        )
+
+        prepared = prepared.subclip(
+            0,
+            duration,
+        )
+
+        # Close the original after creating copies.
+        try:
+            clip.close()
+        except Exception:
+            pass
+
+    else:
+        max_start = max(
+            0,
+            clip.duration - duration,
+        )
+
+        if max_start > 0:
+            start = random.uniform(
+                0,
+                max_start,
+            )
+        else:
+            start = 0
+
+        prepared = clip.subclip(
+            start,
+            start + duration,
+        )
+
+    # Crop source into a vertical 9:16 frame.
+    source_ratio = (
+        prepared.w
+        / prepared.h
+    )
+
+    target_ratio = (
+        VIDEO_W
+        / VIDEO_H
+    )
+
+    if source_ratio > target_ratio:
+
+        new_width = (
+            prepared.h
+            * target_ratio
+        )
+
+        x1 = (
+            prepared.w
+            - new_width
+        ) / 2
+
+        prepared = prepared.crop(
+            x1=x1,
+            x2=x1 + new_width,
+        )
+
+    else:
+
+        new_height = (
+            prepared.w
+            / target_ratio
+        )
+
+        y1 = (
+            prepared.h
+            - new_height
+        ) / 2
+
+        prepared = prepared.crop(
+            y1=y1,
+            y2=y1 + new_height,
+        )
+
+    prepared = prepared.resize(
+        newsize=(
+            VIDEO_W,
+            VIDEO_H,
+        )
+    )
+
+    return prepared
 
 
-def save_caption_images(
-    script: Dict[str, Any],
-    run_dir: Path,
-) -> List[Path]:
+# ============================================================
+# BUILD VIDEO
+# ============================================================
 
-    caption_dir = run_dir / "captions"
+def build_video(
+    script,
+    footage,
+    audio_files,
+    work_dir,
+):
+    print(
+        "[SpaceFacts] Building final vertical video..."
+    )
+
+    scenes = script["scenes"]
+
+    audio_clips = []
+
+    for audio_path in audio_files:
+        audio = AudioFileClip(
+            str(audio_path)
+        )
+
+        audio_clips.append(audio)
+
+    # Determine scene durations from narration audio.
+    scene_durations = [
+        audio.duration
+        for audio in audio_clips
+    ]
+
+    total_narration_duration = sum(
+        scene_durations
+    )
+
+    # Keep Shorts between 30 and 45 seconds.
+    target_duration = min(
+        max(
+            total_narration_duration,
+            TARGET_MIN_SECONDS,
+        ),
+        TARGET_MAX_SECONDS,
+    )
+
+    # If narration somehow exceeds 45 seconds,
+    # proportionally scale scene durations.
+    if total_narration_duration > target_duration:
+        scale = (
+            target_duration
+            / total_narration_duration
+        )
+
+        scene_durations = [
+            d * scale
+            for d in scene_durations
+        ]
+
+    print(
+        f"[SpaceFacts] Final narration duration: "
+        f"{target_duration:.2f}s"
+    )
+
+    video_scene_clips = []
+
+    caption_dir = (
+        work_dir
+        / "captions"
+    )
 
     caption_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    paths = []
-
-    for index, scene in enumerate(
-        script["scenes"]
+    for index, (
+        scene,
+        duration,
+    ) in enumerate(
+        zip(
+            scenes,
+            scene_durations,
+        )
     ):
 
-        image = make_caption_image(
-            scene["caption"]
+        footage_info = footage[
+            index % len(footage)
+        ]
+
+        footage_path = Path(
+            footage_info["path"]
         )
 
-        path = (
+        print(
+            f"[SpaceFacts] Preparing footage "
+            f"{index + 1}/{len(scenes)}: "
+            f"{footage_path.name}"
+        )
+
+        prepared = prepare_footage_clip(
+            footage_path,
+            duration,
+        )
+
+        caption_path = (
             caption_dir
-            / f"caption_{index:02d}.png"
+            / f"caption_{index + 1:02d}.png"
         )
 
-        image.save(
-            path
+        make_caption_image(
+            scene["caption"],
+            caption_path,
         )
 
-        paths.append(
-            path
-        )
-
-    return paths
-
-
-# ============================================================
-# BGM
-# ============================================================
-
-def find_bgm() -> Optional[Path]:
-
-    if not BGM_DIR.exists():
-        return None
-
-    files = [
-        path
-        for path in BGM_DIR.rglob("*")
-        if (
-            path.is_file()
-            and path.suffix.lower()
-            in {
-                ".mp3",
-                ".wav",
-                ".m4a",
-            }
-        )
-    ]
-
-    if not files:
-        return None
-
-    return random.choice(
-        files
-    )
-
-
-# ============================================================
-# VIDEO BUILD
-# ============================================================
-
-def build_video(
-    script: Dict[str, Any],
-    footage_items: List[Dict[str, Any]],
-    audio_paths: List[Path],
-    total_duration: float,
-    run_dir: Path,
-) -> Path:
-
-    log(
-        "Building final vertical video..."
-    )
-
-    scenes = script["scenes"]
-
-    final_duration = clamp(
-        total_duration,
-        TARGET_MIN_SECONDS,
-        TARGET_MAX_SECONDS,
-    )
-
-    weights = [
-        max(
-            len(
-                scene["narration"].split()
-            ),
-            1,
-        )
-        for scene in scenes
-    ]
-
-    total_weight = sum(
-        weights
-    )
-
-    scene_durations = [
-        final_duration
-        * (
-            weight / total_weight
-        )
-        for weight in weights
-    ]
-
-    if not footage_items:
-
-        raise RuntimeError(
-            "No footage available."
-        )
-
-    prepared_clips = []
-    narration_clips = []
-    caption_layers = []
-
-    background = None
-    narration = None
-    final_video = None
-    bgm = None
-    final_audio = None
-
-    try:
-
-        # ----------------------------------------------------
-        # FOOTAGE
-        # ----------------------------------------------------
-
-        for index, duration in enumerate(
-            scene_durations
-        ):
-
-            footage = footage_items[
-                index
-                % len(footage_items)
-            ]
-
-            log(
-                f"Preparing footage "
-                f"{index + 1}/"
-                f"{len(scenes)}: "
-                f"{footage.get('title', '')}"
+        caption_clip = (
+            ImageClip(
+                str(caption_path)
             )
-
-            clip = prepare_footage_clip(
-                footage["path"],
-                duration,
+            .set_duration(duration)
+            .set_position(
+                ("center", "center")
             )
-
-            prepared_clips.append(
-                clip
-            )
-
-        background = concatenate_videoclips(
-            prepared_clips,
-            method="compose",
         )
 
-        background = background.set_duration(
-            final_duration
-        )
-
-        # ----------------------------------------------------
-        # NARRATION
-        # ----------------------------------------------------
-
-        for path in audio_paths:
-
-            narration_clips.append(
-                AudioFileClip(
-                    str(path)
-                )
-            )
-
-        narration = concatenate_audio(
-            narration_clips
-        )
-
-        # ----------------------------------------------------
-        # CAPTIONS
-        # ----------------------------------------------------
-
-        caption_images = save_caption_images(
-            script,
-            run_dir,
-        )
-
-        current_time = 0.0
-
-        for index, duration in enumerate(
-            scene_durations
-        ):
-
-            caption = (
-                ImageClip(
-                    str(
-                        caption_images[index]
-                    )
-                )
-                .set_start(
-                    current_time
-                )
-                .set_duration(
-                    duration
-                )
-                .set_position(
-                    (
-                        "center",
-                        1120,
-                    )
-                )
-            )
-
-            caption_layers.append(
-                caption
-            )
-
-            current_time += duration
-
-        # ----------------------------------------------------
-        # COMPOSITE
-        # ----------------------------------------------------
-
-        final_video = CompositeVideoClip(
+        composite = CompositeVideoClip(
             [
-                background,
-                *caption_layers,
+                prepared,
+                caption_clip,
             ],
             size=(
                 VIDEO_W,
                 VIDEO_H,
             ),
+        ).set_duration(duration)
+
+        video_scene_clips.append(
+            composite
         )
 
-        # ----------------------------------------------------
-        # BGM
-        # ----------------------------------------------------
-
-        bgm_path = find_bgm()
-
-        if bgm_path:
-
-            try:
-
-                bgm = AudioFileClip(
-                    str(bgm_path)
-                )
-
-                if bgm.duration < final_duration:
-
-                    repeats = (
-                        int(
-                            final_duration
-                            / bgm.duration
-                        )
-                        + 1
-                    )
-
-                    bgm_parts = [
-                        bgm.copy()
-                        for _ in range(repeats)
-                    ]
-
-                    bgm = concatenate_audio(
-                        bgm_parts
-                    )
-
-                bgm = bgm.subclip(
-                    0,
-                    final_duration,
-                )
-
-                bgm = bgm.volumex(
-                    0.06
-                )
-
-                final_audio = CompositeAudioClip(
-                    [
-                        narration,
-                        bgm,
-                    ]
-                )
-
-                final_video = (
-                    final_video
-                    .set_audio(
-                        final_audio
-                    )
-                )
-
-            except Exception as exc:
-
-                log(
-                    f"BGM skipped: {exc}"
-                )
-
-                final_video = (
-                    final_video
-                    .set_audio(
-                        narration
-                    )
-                )
-
-        else:
-
-            final_video = (
-                final_video
-                .set_audio(
-                    narration
-                )
-            )
-
-        # ----------------------------------------------------
-        # OUTPUT
-        # ----------------------------------------------------
-
-        output_path = (
-            OUTPUT_DIR
-            / (
-                "spacefacts_"
-                + time.strftime(
-                    "%Y%m%d_%H%M%S"
-                )
-                + "_"
-                + uuid.uuid4().hex[:6]
-                + ".mp4"
-            )
-        )
-
-        log(
-            f"Rendering "
-            f"{final_duration:.2f}s video..."
-        )
-
-        final_video.write_videofile(
-            str(output_path),
-            fps=30,
-            codec="libx264",
-            audio_codec="aac",
-            bitrate="8M",
-            audio_bitrate="192k",
-            threads=2,
-            preset="medium",
-            logger="bar",
-        )
-
-        if (
-            not output_path.exists()
-            or output_path.stat().st_size
-            < 100_000
-        ):
-
-            raise RuntimeError(
-                "Video file was not created correctly."
-            )
-
-        return output_path
-
-    finally:
-
-        for obj in [
-            final_video,
-            final_audio,
-            narration,
-            bgm,
-            background,
-        ]:
-
-            try:
-
-                if obj:
-                    obj.close()
-
-            except Exception:
-                pass
-
-        for clip in narration_clips:
-
-            try:
-                clip.close()
-            except Exception:
-                pass
-
-        for clip in caption_layers:
-
-            try:
-                clip.close()
-            except Exception:
-                pass
-
-        for clip in prepared_clips:
-
-            try:
-                clip.close()
-            except Exception:
-                pass
-
-
-# ============================================================
-# YOUTUBE
-# ============================================================
-
-def build_description(
-    script: Dict[str, Any],
-    footage_items: List[Dict[str, Any]],
-) -> str:
-
-    hook = clean_text(
-        script.get(
-            "hook",
-            "",
-        )
-    )
-
-    hashtags = script.get(
-        "hashtags",
-        [],
-    )
-
-    description = (
-        hook
-        + "\n\n"
-        + " ".join(hashtags)
-    )
-
-    coverr_items = [
-        item
-        for item in footage_items
-        if item.get(
-            "provider"
-        ) == "Coverr"
-    ]
-
-    if coverr_items:
-
-        description += (
-            "\n\n"
-            "Footage provided by Coverr."
-            "\n"
-            "https://coverr.co/"
-        )
-
-        seen = set()
-
-        for item in coverr_items:
-
-            source_url = clean_text(
-                item.get(
-                    "source_url",
-                    "",
-                )
-            )
-
-            if (
-                source_url
-                and source_url not in seen
-            ):
-
-                description += (
-                    "\nSource: "
-                    + source_url
-                )
-
-                seen.add(
-                    source_url
-                )
-
-    return description
-
-
-def upload_to_youtube(
-    video_path: Path,
-    script: Dict[str, Any],
-    footage_items: List[Dict[str, Any]],
-) -> Any:
-
-    from youtube_upload import upload_video
-
-    title = clean_text(
-        script.get(
-            "title",
-            "Amazing Fact",
-        )
-    )
-
-    description = build_description(
-        script,
-        footage_items,
-    )
-
-    hashtags = script.get(
-        "hashtags",
-        [],
-    )
-
-    tags = []
-
-    for hashtag in hashtags:
-
-        tag = hashtag.lstrip(
-            "#"
-        ).strip()
-
-        if tag:
-            tags.append(
-                tag
-            )
-
-    return upload_video(
-        video_path=str(
-            video_path
-        ),
-        title=title,
-        description=description,
-        tags=tags,
-        privacy_status="public",
-    )
-
-
-# ============================================================
-# UPLOAD LOG
-# ============================================================
-
-def log_upload(
-    video_path: Path,
-    script: Dict[str, Any],
-    topic_data: Dict[str, Any],
-    footage_items: List[Dict[str, Any]],
-    upload_result: Any,
-) -> None:
-
-    entry = {
-        "timestamp": time.strftime(
-            "%Y-%m-%dT%H:%M:%S"
-        ),
-        "video": str(
-            video_path
-        ),
-        "title": script.get(
-            "title",
-            "",
-        ),
-        "topic": topic_data.get(
-            "topic",
-            "",
-        ),
-        "category": topic_data.get(
-            "category",
-            "",
-        ),
-        "upload_result": upload_result,
-        "footage": [
-            {
-                "provider": item.get(
-                    "provider",
-                    "",
-                ),
-                "source_id": item.get(
-                    "source_id",
-                    "",
-                ),
-                "source_url": item.get(
-                    "source_url",
-                    "",
-                ),
-                "query": item.get(
-                    "query",
-                    "",
-                ),
-                "title": item.get(
-                    "title",
-                    "",
-                ),
-            }
-            for item in footage_items
-        ],
-    }
-
-    with open(
-        UPLOAD_LOG_FILE,
-        "a",
-        encoding="utf-8",
-    ) as file:
-
-        file.write(
-            json.dumps(
-                entry,
-                ensure_ascii=False,
-            )
-            + "\n"
-        )
-
-
-# ============================================================
-# METADATA
-# ============================================================
-
-def save_run_metadata(
-    run_dir: Path,
-    topic_data: Dict[str, Any],
-    script: Dict[str, Any],
-    footage_items: List[Dict[str, Any]],
-) -> None:
-
-    metadata = {
-        "version": VERSION,
-        "timestamp": time.strftime(
-            "%Y-%m-%dT%H:%M:%S"
-        ),
-        "topic": topic_data,
-        "script": script,
-        "footage": footage_items,
-    }
-
-    (
-        run_dir / "script.json"
-    ).write_text(
-        json.dumps(
-            metadata,
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-
-# ============================================================
-# MAIN PIPELINE
-# ============================================================
-
-def run_pipeline() -> None:
-
-    print()
-    print("=" * 70)
-    print(
-        f"SPACE FACTS PIPELINE {VERSION}"
-    )
-    print(
-        "COVERR MULTI-CLIP SHORTS FORMAT"
-    )
-    print("=" * 70)
-    print()
-
-    validate_environment()
-
-    state = load_state()
-
-    # --------------------------------------------------------
-    # TOPIC
-    # --------------------------------------------------------
-
-    log(
-        "Fetching a fresh topic..."
-    )
-
-    topic_data = get_dynamic_topic(
-        state
-    )
-
-    log(
-        f"Selected topic: "
-        f"{topic_data.get('topic', '')}"
-    )
-
-    # --------------------------------------------------------
-    # SCRIPT
-    # --------------------------------------------------------
-
-    log(
-        "Generating Shorts script..."
-    )
-
-    script = generate_script(
-        topic_data
-    )
-
-    word_count = total_narration_words(
-        script
-    )
-
-    log(
-        f"Generated {word_count} "
-        f"narration words."
-    )
-
-    log(
-        f"Title: "
-        f"{script.get('title', '')}"
-    )
-
-    log(
-        "Visual queries: "
-        + ", ".join(
-            script.get(
-                "visual_search_queries",
-                [],
-            )
-        )
-    )
-
-    # --------------------------------------------------------
-    # RUN DIRECTORY
-    # --------------------------------------------------------
-
-    run_id = (
-        time.strftime(
-            "%Y%m%d_%H%M%S"
-        )
-        + "_"
-        + uuid.uuid4().hex[:6]
-    )
-
-    run_dir = (
-        OUTPUT_DIR
-        / run_id
-    )
-
-    run_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    # --------------------------------------------------------
-    # FOOTAGE
-    # --------------------------------------------------------
-
-    scene_count = len(
-        script["scenes"]
-    )
-
-    number_of_clips = min(
-        max(
-            scene_count,
-            3,
-        ),
-        5,
-    )
-
-    footage_items = select_footage(
-        style=script.get(
-            "footage_style",
-            "general",
-        ),
-        visual_search_queries=script.get(
-            "visual_search_queries",
-            [],
-        ),
-        state=state,
-        number_of_clips=number_of_clips,
-    )
-
-    if not footage_items:
-
-        raise RuntimeError(
-            "No footage could be obtained."
-        )
-
-    log(
-        f"Using {len(footage_items)} "
-        f"footage clips."
-    )
-
-    # --------------------------------------------------------
-    # SAVE METADATA
-    # --------------------------------------------------------
-
-    save_run_metadata(
-        run_dir,
-        topic_data,
-        script,
-        footage_items,
+    final_video = concatenate_videoclips(
+        video_scene_clips,
+        method="compose",
     )
 
     # --------------------------------------------------------
     # AUDIO
     # --------------------------------------------------------
 
-    audio_paths, total_duration = (
-        synthesize_all_audio(
-            script,
-            run_dir,
+    current_time = 0
+
+    positioned_audio = []
+
+    for audio in audio_clips:
+
+        remaining = (
+            target_duration
+            - current_time
         )
+
+        if remaining <= 0:
+            break
+
+        duration = min(
+            audio.duration,
+            remaining,
+        )
+
+        audio_segment = (
+            audio
+            .subclip(
+                0,
+                duration,
+            )
+            .set_start(current_time)
+        )
+
+        positioned_audio.append(
+            audio_segment
+        )
+
+        current_time += duration
+
+    # Optional background music.
+    bgm_clip = None
+
+    if BGM_DIR.exists():
+
+        bgm_files = [
+            p
+            for p in BGM_DIR.iterdir()
+            if p.is_file()
+            and p.suffix.lower()
+            in {
+                ".mp3",
+                ".wav",
+                ".m4a",
+            }
+        ]
+
+        if bgm_files:
+
+            try:
+                selected_bgm = random.choice(
+                    bgm_files
+                )
+
+                bgm_clip = AudioFileClip(
+                    str(selected_bgm)
+                )
+
+                if bgm_clip.duration < target_duration:
+
+                    repeats = int(
+                        target_duration
+                        / bgm_clip.duration
+                    ) + 1
+
+                    bgm_parts = [
+                        bgm_clip.copy()
+                        for _ in range(repeats)
+                    ]
+
+                    bgm_loop = concatenate_videoclips(
+                        [],
+                        method="compose",
+                    ) if False else None
+
+                    # Use audio clips directly.
+                    from moviepy.audio.AudioClip import concatenate_audioclips
+
+                    bgm_combined = (
+                        concatenate_audioclips(
+                            bgm_parts
+                        )
+                        .subclip(
+                            0,
+                            target_duration,
+                        )
+                    )
+
+                    try:
+                        bgm_clip.close()
+                    except Exception:
+                        pass
+
+                    bgm_clip = bgm_combined
+
+                else:
+                    bgm_clip = bgm_clip.subclip(
+                        0,
+                        target_duration,
+                    )
+
+                bgm_clip = bgm_clip.volumex(
+                    0.06
+                )
+
+                positioned_audio.append(
+                    bgm_clip
+                )
+
+            except Exception as e:
+                print(
+                    f"[SpaceFacts] BGM failed: {e}"
+                )
+
+                bgm_clip = None
+
+    if positioned_audio:
+
+        final_audio = CompositeAudioClip(
+            positioned_audio
+        )
+
+        final_video = final_video.set_audio(
+            final_audio
+        )
+
+    output_name = (
+        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"_{slugify(script['title'])}.mp4"
     )
 
-    final_duration = clamp(
-        total_duration,
-        TARGET_MIN_SECONDS,
-        TARGET_MAX_SECONDS,
+    output_path = (
+        OUTPUT_DIR
+        / output_name
     )
 
-    log(
-        f"Final narration duration: "
-        f"{final_duration:.2f}s"
+    print(
+        f"[SpaceFacts] Rendering: {output_path}"
     )
 
-    # --------------------------------------------------------
-    # VIDEO
-    # --------------------------------------------------------
-
-    video_path = build_video(
-        script=script,
-        footage_items=footage_items,
-        audio_paths=audio_paths,
-        total_duration=final_duration,
-        run_dir=run_dir,
+    final_video.write_videofile(
+        str(output_path),
+        fps=30,
+        codec="libx264",
+        audio_codec="aac",
+        bitrate="8M",
+        audio_bitrate="192k",
+        threads=2,
+        preset="medium",
+        logger="bar",
     )
 
-    log(
-        f"Video created: "
-        f"{video_path}"
+    # Cleanup
+    try:
+        final_video.close()
+    except Exception:
+        pass
+
+    for clip in video_scene_clips:
+        try:
+            clip.close()
+        except Exception:
+            pass
+
+    for audio in audio_clips:
+        try:
+            audio.close()
+        except Exception:
+            pass
+
+    if bgm_clip:
+        try:
+            bgm_clip.close()
+        except Exception:
+            pass
+
+    return output_path
+
+
+# ============================================================
+# DESCRIPTION
+# ============================================================
+
+def build_description(
+    script,
+    topic,
+):
+    hashtags = script.get(
+        "hashtags",
+        [],
     )
 
-    # --------------------------------------------------------
-    # UPLOAD
-    # --------------------------------------------------------
-
-    log(
-        "Uploading to YouTube..."
+    hashtag_text = " ".join(
+        hashtags
     )
 
-    upload_result = upload_to_youtube(
-        video_path,
+    source_text = ""
+
+    if topic.get("type") == "on_this_day":
+        source_text = (
+            "Source: Wikimedia / Wikipedia "
+            "On This Day."
+        )
+
+    elif topic.get("type") == "trivia":
+        source_text = (
+            "Source: Open Trivia Database."
+        )
+
+    else:
+        source_text = (
+            "Source: General educational references."
+        )
+
+    return f"""Interesting facts, history, science and technology in under a minute.
+
+{source_text}
+
+Footage provided by Coverr.
+{COVERR_BASE_URL}
+
+{hashtag_text}
+"""
+
+
+# ============================================================
+# UPLOAD
+# ============================================================
+
+def upload_to_youtube(
+    video_path,
+    script,
+    topic,
+):
+    print(
+        "[SpaceFacts] Uploading to YouTube..."
+    )
+
+    from youtube_upload import upload_video
+
+    description = build_description(
         script,
-        footage_items,
+        topic,
     )
 
-    log(
-        "YouTube upload completed."
+    tags = [
+        "shorts",
+        "facts",
+        "interesting facts",
+        "history",
+        "science",
+        "trivia",
+        "technology",
+    ]
+
+    # Add topic words as tags.
+    topic_words = re.findall(
+        r"[A-Za-z0-9]+",
+        script["title"].lower(),
     )
 
-    # --------------------------------------------------------
-    # ONLY AFTER SUCCESSFUL UPLOAD:
-    # UPDATE STATE
-    # --------------------------------------------------------
+    for word in topic_words:
+        if len(word) >= 3 and word not in tags:
+            tags.append(word)
 
-    remember_title(
-        state,
-        script.get(
-            "title",
-            "",
-        ),
+    result = upload_video(
+        video_path=str(video_path),
+        title=script["title"],
+        description=description,
+        tags=tags,
+        privacy_status="public",
     )
 
-    source_id = topic_data.get(
-        "source_id",
-        "",
+    return result
+
+
+# ============================================================
+# UPLOAD LOG
+# ============================================================
+
+def append_upload_log(
+    video_path,
+    script,
+    topic,
+    upload_result,
+):
+    entry = {
+        "timestamp": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "version": VERSION,
+        "video": str(video_path),
+        "title": script["title"],
+        "topic": topic.get("topic"),
+        "source_type": topic.get("type"),
+        "source_id": topic.get("source_id"),
+        "upload_result": upload_result,
+    }
+
+    with open(
+        UPLOAD_LOG_FILE,
+        "a",
+        encoding="utf-8",
+    ) as f:
+
+        f.write(
+            json.dumps(
+                entry,
+                ensure_ascii=False,
+                default=str,
+            )
+            + "\n"
+        )
+
+
+# ============================================================
+# STATE UPDATE
+# ============================================================
+
+def update_state_after_success(
+    state,
+    topic,
+    script,
+    footage,
+):
+    source_id = topic.get(
+        "source_id"
     )
 
     if source_id:
-
-        remember_source(
-            state,
-            source_id,
+        source_ids = state.setdefault(
+            "used_source_ids",
+            [],
         )
 
-    topic_key = topic_data.get(
-        "key",
-        topic_data.get(
-            "source_id",
-            "",
-        ),
+        if source_id not in source_ids:
+            source_ids.append(
+                source_id
+            )
+
+        # Keep state manageable.
+        state["used_source_ids"] = (
+            source_ids[-200:]
+        )
+
+    topic_key = topic.get(
+        "topic_key"
     )
 
     if topic_key:
-
-        remember_topic(
-            state,
-            topic_key,
+        topic_keys = state.setdefault(
+            "used_topic_keys",
+            [],
         )
 
-    for footage in footage_items:
-
-        path = footage.get(
-            "path",
-            "",
-        )
-
-        remember_footage(
-            state,
-            path,
-        )
-
-        footage_source = footage.get(
-            "source_id",
-            "",
-        )
-
-        if footage_source:
-
-            remember_source(
-                state,
-                footage_source,
+        if topic_key not in topic_keys:
+            topic_keys.append(
+                topic_key
             )
 
-    save_state(
-        state
+        state["used_topic_keys"] = (
+            topic_keys[-200:]
+        )
+
+    title = script.get(
+        "title"
     )
 
-    # --------------------------------------------------------
-    # LOG
-    # --------------------------------------------------------
+    if title:
+        recent_titles = state.setdefault(
+            "recent_titles",
+            [],
+        )
 
-    log_upload(
-        video_path,
-        script,
-        topic_data,
-        footage_items,
-        upload_result,
+        recent_titles.append(
+            title
+        )
+
+        state["recent_titles"] = (
+            recent_titles[-40:]
+        )
+
+    used_gameplay = state.setdefault(
+        "used_gameplay",
+        [],
     )
 
-    print()
-    print("=" * 70)
-    print("UPLOAD SUCCESSFUL")
-    print(
-        f"Title: "
-        f"{script.get('title', '')}"
+    for item in footage:
+
+        if item.get("source") != "local":
+            continue
+
+        source_id = item.get(
+            "source_id"
+        )
+
+        if (
+            source_id
+            and source_id not in used_gameplay
+        ):
+            used_gameplay.append(
+                source_id
+            )
+
+    state["used_gameplay"] = (
+        used_gameplay[-200:]
     )
-    print(
-        f"Duration: "
-        f"{final_duration:.2f}s"
-    )
-    print(
-        f"Footage clips: "
-        f"{len(footage_items)}"
-    )
-    print("=" * 70)
-    print()
 
 
 # ============================================================
-# ENTRY POINT
+# MAIN
 # ============================================================
 
-if __name__ == "__main__":
+def main():
+    print("=" * 60)
+    print(
+        f"SPACE FACTS PIPELINE {VERSION}"
+    )
+    print(
+        "COVERR MULTI-CLIP SHORTS FORMAT"
+    )
+    print("=" * 60)
+
+    if not GEMINI_API_KEY:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not configured."
+        )
+
+    state = load_state()
+
+    work_id = (
+        datetime.now()
+        .strftime("%Y%m%d_%H%M%S")
+        + "_"
+        + str(random.randint(1000, 9999))
+    )
+
+    work_dir = (
+        OUTPUT_DIR
+        / f"work_{work_id}"
+    )
+
+    work_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     try:
 
-        run_pipeline()
+        # ----------------------------------------------------
+        # 1. SELECT TOPIC
+        # ----------------------------------------------------
 
-    except KeyboardInterrupt:
-
-        print(
-            "\nPipeline interrupted."
+        topic = select_topic(
+            state
         )
 
-        sys.exit(130)
+        # ----------------------------------------------------
+        # 2. GENERATE SCRIPT
+        # ----------------------------------------------------
 
-    except Exception as exc:
-
-        print()
-        print("=" * 70)
-        print("PIPELINE FAILED")
-        print("=" * 70)
-
-        print(
-            f"{type(exc).__name__}: {exc}"
+        script = generate_script(
+            topic
         )
 
-        import traceback
+        # ----------------------------------------------------
+        # 3. GET FOOTAGE
+        # ----------------------------------------------------
 
-        traceback.print_exc()
+        footage = select_footage(
+            script,
+            state,
+        )
 
-        print("=" * 70)
+        # ----------------------------------------------------
+        # 4. GENERATE TTS
+        # ----------------------------------------------------
 
-        sys.exit(1)
+        audio_dir = (
+            work_dir
+            / "audio"
+        )
+
+        audio_files = generate_scene_audio(
+            script["scenes"],
+            audio_dir,
+        )
+
+        # ----------------------------------------------------
+        # 5. BUILD VIDEO
+        # ----------------------------------------------------
+
+        video_path = build_video(
+            script,
+            footage,
+            audio_files,
+            work_dir,
+        )
+
+        # ----------------------------------------------------
+        # 6. UPLOAD
+        # ----------------------------------------------------
+
+        upload_result = upload_to_youtube(
+            video_path,
+            script,
+            topic,
+        )
+
+        print(
+            "[SpaceFacts] YouTube upload completed."
+        )
+
+        # ----------------------------------------------------
+        # 7. LOG SUCCESS
+        # ----------------------------------------------------
+
+        append_upload_log(
+            video_path,
+            script,
+            topic,
+            upload_result,
+        )
+
+        # ----------------------------------------------------
+        # 8. ONLY NOW UPDATE STATE
+        # ----------------------------------------------------
+
+        update_state_after_success(
+            state,
+            topic,
+            script,
+            footage,
+        )
+
+        save_state(
+            state
+        )
+
+        print(
+            "[SpaceFacts] State saved after successful upload."
+        )
+
+        print("=" * 60)
+        print(
+            "[SpaceFacts] PIPELINE COMPLETED SUCCESSFULLY"
+        )
+        print("=" * 60)
+
+    except Exception as e:
+
+        print("=" * 60)
+        print(
+            "[SpaceFacts] PIPELINE FAILED"
+        )
+        print(
+            f"[SpaceFacts] Error: {e}"
+        )
+        print("=" * 60)
+
+        # Do NOT save state here.
+        # This prevents failed videos from being marked
+        # as successfully used topics.
+
+        raise
+
+    finally:
+
+        # Remove temporary working files.
+        # Keep the final MP4 in output_spacefacts.
+        try:
+            import shutil
+
+            if work_dir.exists():
+                shutil.rmtree(
+                    work_dir,
+                    ignore_errors=True,
+                )
+
+        except Exception as e:
+            print(
+                f"[SpaceFacts] Work directory cleanup "
+                f"failed: {e}"
+            )
+
+
+if __name__ == "__main__":
+    main()
