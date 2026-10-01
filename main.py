@@ -1,24 +1,23 @@
 """
-SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v6)
+SPACE FACTS CHANNEL — AUTOMATED SHORTS PIPELINE (v7)
 
 FORMAT:
-    Gameplay / building footage
+    Minecraft / Roblox / satisfying gameplay
     +
     Interesting history / trivia narration
     +
-    Dynamic short captions
+    Dynamic captions
 
 PIPELINE:
 1. Fetch fresh "On This Day" historical events and/or trivia
 2. Select a strong topic with Gemini
-3. Generate a 30–45 second Shorts story
+3. Generate a 30–45 second story
 4. Generate narration with Edge TTS
 5. Select gameplay footage from gameplay/
 6. Crop gameplay to 1080x1920
 7. Add dynamic captions
-8. Add subtle camera movement
-9. Assemble the Short
-10. Upload to YouTube as public
+8. Assemble the Short
+9. Upload to YouTube
 
 GAMEPLAY FOLDER:
 
@@ -26,20 +25,21 @@ gameplay/
 ├── minecraft/
 │   ├── build01.mp4
 │   ├── build02.mp4
-│   └── build03.mp4
+│   └── gameplay01.mp4
 │
 ├── roblox/
 │   ├── build01.mp4
 │   └── gameplay01.mp4
 │
 └── satisfying/
-    ├── build01.mp4
-    └── parkour01.mp4
+    ├── parkour01.mp4
+    └── build01.mp4
 
-The pipeline recursively searches gameplay/ for video files.
+The pipeline recursively searches gameplay/ for:
+.mp4, .mov, .webm, .mkv
 
-Existing infrastructure preserved:
-- Gemini model discovery + fallback
+Existing infrastructure:
+- Gemini
 - Wikimedia On This Day
 - Open Trivia Database
 - Edge TTS
@@ -57,9 +57,10 @@ import asyncio
 import time
 import html
 import re
-from datetime import datetime, timezone
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
-from urllib.parse import quote
 
 import requests
 import youtube_upload
@@ -69,13 +70,26 @@ import youtube_upload
 # CONFIG
 # ==================================================================
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get(
+    "GEMINI_API_KEY",
+    "",
+)
 
-STATE_FILE = Path("state_spacefacts.json")
-UPLOAD_LOG_FILE = Path("upload_log.jsonl")
+STATE_FILE = Path(
+    "state_spacefacts.json"
+)
 
-OUTPUT_DIR = Path("output_spacefacts")
-OUTPUT_DIR.mkdir(exist_ok=True)
+UPLOAD_LOG_FILE = Path(
+    "upload_log.jsonl"
+)
+
+OUTPUT_DIR = Path(
+    "output_spacefacts"
+)
+
+OUTPUT_DIR.mkdir(
+    exist_ok=True
+)
 
 GAMEPLAY_DIR = Path(
     os.environ.get(
@@ -88,7 +102,8 @@ VIDEO_W = 1080
 VIDEO_H = 1920
 
 CAPTION_FONT_PATH = str(
-    Path(__file__).parent / "Anton-Regular.ttf"
+    Path(__file__).parent
+    / "Anton-Regular.ttf"
 )
 
 BGM_DIR = Path(
@@ -126,7 +141,7 @@ CONTENT_WEIGHTS = {
 
 
 # ==================================================================
-# TTS
+# TEXT TO SPEECH
 # ==================================================================
 
 TTS_VOICES = [
@@ -143,24 +158,39 @@ TTS_VOICES = [
 
 FALLBACK_TOPICS = [
     {
-        "topic": "why the pyramids still stand after thousands of years",
-        "category": "building",
-    },
-    {
-        "topic": "how ancient Roman concrete could repair itself",
+        "topic": (
+            "why the pyramids still stand "
+            "after thousands of years"
+        ),
         "category": "history",
     },
     {
-        "topic": "why the Antikythera mechanism was so advanced",
+        "topic": (
+            "how ancient Roman concrete "
+            "could repair itself"
+        ),
         "category": "history",
     },
     {
-        "topic": "why the Voynich manuscript remains undecoded",
+        "topic": (
+            "why the Antikythera mechanism "
+            "was so advanced"
+        ),
         "category": "history",
     },
     {
-        "topic": "why astronauts age slightly differently in orbit",
-        "category": "space",
+        "topic": (
+            "why the Voynich manuscript "
+            "remains undecoded"
+        ),
+        "category": "history",
+    },
+    {
+        "topic": (
+            "why astronauts experience "
+            "slightly different aging"
+        ),
+        "category": "science",
     },
 ]
 
@@ -174,16 +204,21 @@ def validate_environment():
     missing = []
 
     if not GEMINI_API_KEY:
-        missing.append("GEMINI_API_KEY")
+
+        missing.append(
+            "GEMINI_API_KEY"
+        )
 
     if not GAMEPLAY_DIR.exists():
+
         print(
-            f"WARNING: Gameplay directory does not exist:"
-            f" {GAMEPLAY_DIR}"
+            f"WARNING: Gameplay directory "
+            f"does not exist: {GAMEPLAY_DIR}"
         )
 
         print(
-            "Create gameplay/ and add your gameplay videos."
+            "Create gameplay/ and add "
+            "your gameplay videos."
         )
 
     if not Path(
@@ -191,13 +226,15 @@ def validate_environment():
     ).exists():
 
         print(
-            "WARNING: Anton-Regular.ttf was not found."
+            "WARNING: Anton-Regular.ttf "
+            "was not found."
         )
 
     if missing:
 
         raise RuntimeError(
-            "Missing required environment variables: "
+            "Missing required environment "
+            "variables: "
             + ", ".join(missing)
         )
 
@@ -221,7 +258,8 @@ def load_state():
         except Exception as e:
 
             print(
-                f"Warning: Could not read state file: {e}"
+                "Warning: Could not read "
+                f"state file: {e}"
             )
 
     return {
@@ -238,6 +276,7 @@ def save_state(state):
         json.dumps(
             state,
             indent=2,
+            ensure_ascii=False,
         ),
         encoding="utf-8",
     )
@@ -245,13 +284,17 @@ def save_state(state):
 
 def get_recent_titles():
 
-    return load_state().get(
+    state = load_state()
+
+    return state.get(
         "recent_titles",
         [],
     )
 
 
-def record_used_title(title):
+def record_used_title(
+    title
+):
 
     state = load_state()
 
@@ -260,14 +303,25 @@ def record_used_title(title):
         [],
     )
 
-    recent.append(title)
+    recent.append(
+        title
+    )
 
-    state["recent_titles"] = recent[-40:]
+    state["recent_titles"] = (
+        recent[-40:]
+    )
 
-    save_state(state)
+    save_state(
+        state
+    )
 
 
-def remember_source(source_id):
+def remember_source(
+    source_id
+):
+
+    if not source_id:
+        return
 
     state = load_state()
 
@@ -276,25 +330,29 @@ def remember_source(source_id):
         [],
     )
 
-    if source_id:
+    used.append(
+        str(source_id)
+    )
 
-        used.append(
-            str(source_id)
-        )
+    state["used_source_ids"] = (
+        used[-300:]
+    )
 
-    state["used_source_ids"] = used[-300:]
+    save_state(
+        state
+    )
 
-    save_state(state)
 
-
-def source_was_used(source_id):
+def source_was_used(
+    source_id
+):
 
     if not source_id:
         return False
 
     state = load_state()
 
-    return str(source_id) in [
+    used = [
         str(x)
         for x in state.get(
             "used_source_ids",
@@ -302,8 +360,18 @@ def source_was_used(source_id):
         )
     ]
 
+    return (
+        str(source_id)
+        in used
+    )
 
-def remember_topic(topic_key):
+
+def remember_topic(
+    topic_key
+):
+
+    if not topic_key:
+        return
 
     state = load_state()
 
@@ -312,28 +380,40 @@ def remember_topic(topic_key):
         [],
     )
 
-    if topic_key:
+    used.append(
+        str(topic_key)
+    )
 
-        used.append(
-            str(topic_key)
-        )
+    state["used_topic_keys"] = (
+        used[-300:]
+    )
 
-    state["used_topic_keys"] = used[-300:]
+    save_state(
+        state
+    )
 
-    save_state(state)
 
+def topic_was_used(
+    topic_key
+):
 
-def topic_was_used(topic_key):
+    if not topic_key:
+        return False
 
     state = load_state()
 
-    return str(topic_key) in [
+    used = [
         str(x)
         for x in state.get(
             "used_topic_keys",
             [],
         )
     ]
+
+    return (
+        str(topic_key)
+        in used
+    )
 
 
 # ==================================================================
@@ -352,7 +432,9 @@ def log_upload(
         "title": title,
         "category": category,
         "ending_style": ending_style,
-        "url": f"https://youtu.be/{video_id}",
+        "url": (
+            f"https://youtu.be/{video_id}"
+        ),
     }
 
     with open(
@@ -362,13 +444,16 @@ def log_upload(
     ) as f:
 
         f.write(
-            json.dumps(entry)
+            json.dumps(
+                entry,
+                ensure_ascii=False,
+            )
             + "\n"
         )
 
 
 # ==================================================================
-# RETRY
+# RETRY SYSTEM
 # ==================================================================
 
 def retry_with_backoff(
@@ -390,19 +475,19 @@ def retry_with_backoff(
 
             return fn(
                 *args,
-                **kwargs
+                **kwargs,
             )
 
         except Exception as e:
 
             last_exc = e
 
-            if should_retry is not None:
+            if should_retry:
 
                 try:
 
-                    retryable = should_retry(
-                        e
+                    retryable = (
+                        should_retry(e)
                     )
 
                 except Exception:
@@ -410,9 +495,14 @@ def retry_with_backoff(
                     retryable = False
 
                 if not retryable:
+
                     raise
 
-            if attempt >= retries - 1:
+            if (
+                attempt
+                >= retries - 1
+            ):
+
                 break
 
             delay = (
@@ -430,7 +520,8 @@ def retry_with_backoff(
             )
 
             print(
-                f"      Retrying in {delay:.1f}s..."
+                f"      Retrying in "
+                f"{delay:.1f}s..."
             )
 
             time.sleep(
@@ -444,9 +535,13 @@ def retry_with_backoff(
 # GEMINI ERROR DETECTION
 # ==================================================================
 
-def is_model_unavailable_error(e):
+def is_model_unavailable_error(
+    error
+):
 
-    msg = str(e).lower()
+    message = str(
+        error
+    ).lower()
 
     markers = [
         "404",
@@ -460,14 +555,18 @@ def is_model_unavailable_error(e):
     ]
 
     return any(
-        marker in msg
+        marker in message
         for marker in markers
     )
 
 
-def is_gemini_retryable_error(e):
+def is_gemini_retryable_error(
+    error
+):
 
-    msg = str(e).lower()
+    message = str(
+        error
+    ).lower()
 
     markers = [
         "429",
@@ -493,32 +592,37 @@ def is_gemini_retryable_error(e):
     ]
 
     return any(
-        marker in msg
+        marker in message
         for marker in markers
     )
 
 
 # ==================================================================
-# WIKIMEDIA
+# WIKIMEDIA ON THIS DAY
 # ==================================================================
 
 def fetch_on_this_day():
 
+    # Zimbabwe local date.
     today = datetime.now(
-        timezone.utc
+        ZoneInfo(
+            "Africa/Harare"
+        )
     )
 
     month = today.month
     day = today.day
 
     url = (
-        "https://api.wikimedia.org/feed/v1/"
-        f"wikipedia/en/onthisday/all/"
+        "https://api.wikimedia.org/"
+        "feed/v1/wikipedia/en/"
+        "onthisday/all/"
         f"{month:02d}/{day:02d}"
     )
 
     print(
-        f"      Fetching Wikimedia events for "
+        f"      Fetching Wikimedia "
+        f"events for "
         f"{month:02d}/{day:02d}..."
     )
 
@@ -528,7 +632,7 @@ def fetch_on_this_day():
             url,
             headers={
                 "User-Agent":
-                    "SpaceFactsPipeline/6.0"
+                    "SpaceFactsPipeline/7.0"
             },
             timeout=20,
         )
@@ -567,20 +671,22 @@ def fetch_on_this_day():
 
             for page in pages[:3]:
 
-                title = page.get(
+                page_title = page.get(
                     "title",
                     "",
                 )
 
-                if title:
+                if page_title:
+
                     page_titles.append(
-                        title
+                        page_title
                     )
 
-            # Stable enough within the current daily feed.
             source_id = (
-                f"wikimedia-{month:02d}-"
-                f"{day:02d}-{year}-"
+                f"wikimedia-"
+                f"{month:02d}-"
+                f"{day:02d}-"
+                f"{year}-"
                 f"{text[:100]}"
             )
 
@@ -593,6 +699,7 @@ def fetch_on_this_day():
             if source_was_used(
                 source_id
             ):
+
                 continue
 
             candidates.append(
@@ -600,33 +707,41 @@ def fetch_on_this_day():
                     "source": "Wikimedia",
                     "source_id": source_id,
                     "date": (
-                        f"{month:02d}/{day:02d}"
+                        f"{month:02d}/"
+                        f"{day:02d}"
                     ),
                     "year": year,
                     "text": text,
                     "pages": page_titles,
-                    "category": "on_this_day",
+                    "category": (
+                        "on_this_day"
+                    ),
                 }
             )
 
         candidates = [
-            x
-            for x in candidates
-            if 20 <= len(
-                x["text"]
-            ) <= 500
+            item
+            for item in candidates
+            if 20
+            <= len(
+                item["text"]
+            )
+            <= 500
         ]
 
-        # Shuffle so the same first event isn't always selected.
         random.shuffle(
             candidates
         )
 
-        candidates = candidates[:30]
+        candidates = candidates[
+            :30
+        ]
 
         print(
-            f"      Found {len(candidates)} "
-            "usable historical events."
+            f"      Found "
+            f"{len(candidates)} "
+            "usable historical "
+            "events."
         )
 
         return candidates
@@ -634,23 +749,26 @@ def fetch_on_this_day():
     except Exception as e:
 
         print(
-            f"      Wikimedia request failed: {e}"
+            "      Wikimedia request "
+            f"failed: {e}"
         )
 
         return []
 
 
 # ==================================================================
-# OPEN TRIVIA
+# OPEN TRIVIA DATABASE
 # ==================================================================
 
-def clean_trivia_text(text):
+def clean_trivia_text(
+    text
+):
 
     return html.unescape(
         re.sub(
             r"<[^>]+>",
             "",
-            text,
+            str(text),
         )
     ).strip()
 
@@ -658,7 +776,8 @@ def clean_trivia_text(text):
 def fetch_trivia():
 
     url = (
-        "https://opentdb.com/api.php"
+        "https://opentdb.com/"
+        "api.php"
     )
 
     params = {
@@ -667,7 +786,8 @@ def fetch_trivia():
     }
 
     print(
-        "      Fetching general trivia..."
+        "      Fetching general "
+        "trivia..."
     )
 
     try:
@@ -691,21 +811,29 @@ def fetch_trivia():
 
         for item in results:
 
-            question = clean_trivia_text(
-                item.get(
-                    "question",
-                    "",
+            question = (
+                clean_trivia_text(
+                    item.get(
+                        "question",
+                        "",
+                    )
                 )
             )
 
-            answer = clean_trivia_text(
-                item.get(
-                    "correct_answer",
-                    "",
+            answer = (
+                clean_trivia_text(
+                    item.get(
+                        "correct_answer",
+                        "",
+                    )
                 )
             )
 
-            if not question or not answer:
+            if (
+                not question
+                or not answer
+            ):
+
                 continue
 
             source_id = (
@@ -720,6 +848,7 @@ def fetch_trivia():
             if source_was_used(
                 source_id
             ):
+
                 continue
 
             candidates.append(
@@ -733,7 +862,8 @@ def fetch_trivia():
             )
 
         print(
-            f"      Found {len(candidates)} "
+            f"      Found "
+            f"{len(candidates)} "
             "trivia questions."
         )
 
@@ -742,7 +872,8 @@ def fetch_trivia():
     except Exception as e:
 
         print(
-            f"      Trivia request failed: {e}"
+            "      Trivia request "
+            f"failed: {e}"
         )
 
         return []
@@ -757,25 +888,32 @@ def get_available_gemini_models(
 ):
 
     print(
-        "      Discovering available Gemini models..."
+        "      Discovering "
+        "available Gemini models..."
     )
 
     try:
 
         available = []
 
-        for model_info in client.models.list():
+        for model_info in (
+            client.models.list()
+        ):
 
-            supported_actions = getattr(
-                model_info,
-                "supported_actions",
-                [],
-            ) or []
+            supported_actions = (
+                getattr(
+                    model_info,
+                    "supported_actions",
+                    [],
+                )
+                or []
+            )
 
             if (
                 "generateContent"
                 not in supported_actions
             ):
+
                 continue
 
             model_name = getattr(
@@ -787,9 +925,10 @@ def get_available_gemini_models(
             if not model_name:
                 continue
 
-            model_id = model_name.split(
-                "/"
-            )[-1]
+            model_id = (
+                model_name
+                .split("/")[-1]
+            )
 
             available.append(
                 model_id
@@ -798,10 +937,13 @@ def get_available_gemini_models(
         if not available:
 
             print(
-                "      Discovery returned no models."
+                "      Discovery "
+                "returned no models."
             )
 
-            return GEMINI_MODELS.copy()
+            return (
+                GEMINI_MODELS.copy()
+            )
 
         preferred = [
             model
@@ -813,8 +955,10 @@ def get_available_gemini_models(
             model
             for model in available
             if (
-                "flash" in model.lower()
-                and model not in preferred
+                "flash"
+                in model.lower()
+                and model
+                not in preferred
             )
         ]
 
@@ -824,7 +968,8 @@ def get_available_gemini_models(
         )
 
         print(
-            "      Available Flash models:"
+            "      Available Flash "
+            "models:"
         )
 
         for model in models:
@@ -833,19 +978,24 @@ def get_available_gemini_models(
                 f"        - {model}"
             )
 
+        if models:
+
+            return models
+
         return (
-            models
-            if models
-            else GEMINI_MODELS.copy()
+            GEMINI_MODELS.copy()
         )
 
     except Exception as e:
 
         print(
-            f"      Model discovery failed: {e}"
+            "      Model discovery "
+            f"failed: {e}"
         )
 
-        return GEMINI_MODELS.copy()
+        return (
+            GEMINI_MODELS.copy()
+        )
 
 
 # ==================================================================
@@ -864,8 +1014,10 @@ def call_gemini_json(
         api_key=GEMINI_API_KEY
     )
 
-    models = get_available_gemini_models(
-        client
+    models = (
+        get_available_gemini_models(
+            client
+        )
     )
 
     last_error = None
@@ -873,10 +1025,11 @@ def call_gemini_json(
     for model in models:
 
         print(
-            f"\n      Trying Gemini model: {model}"
+            f"\n      Trying Gemini "
+            f"model: {model}"
         )
 
-        def _call():
+        def make_request():
 
             config = {
                 "response_mime_type":
@@ -889,51 +1042,60 @@ def call_gemini_json(
                     "temperature"
                 ] = temperature
 
-            return client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=config,
+            return (
+                client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=config,
+                )
             )
 
         try:
 
-            response = retry_with_backoff(
-                _call,
-                retries=2,
-                base_delay=8,
-                should_retry=is_gemini_retryable_error,
+            response = (
+                retry_with_backoff(
+                    make_request,
+                    retries=2,
+                    base_delay=8,
+                    should_retry=(
+                        is_gemini_retryable_error
+                    ),
+                )
             )
 
-            text = getattr(
+            response_text = getattr(
                 response,
                 "text",
                 None,
             )
 
-            if not text:
+            if not response_text:
 
                 raise RuntimeError(
-                    "Gemini returned an empty response."
+                    "Gemini returned "
+                    "an empty response."
                 )
 
             try:
 
                 return json.loads(
-                    text
+                    response_text
                 )
 
             except json.JSONDecodeError as e:
 
                 print(
-                    "      Invalid JSON from Gemini:"
+                    "      Invalid JSON "
+                    "from Gemini:"
                 )
 
                 print(
-                    text[:3000]
+                    response_text[:3000]
                 )
 
                 raise RuntimeError(
-                    "Gemini returned invalid JSON."
+                    "Gemini returned "
+                    "invalid JSON."
                 ) from e
 
         except Exception as e:
@@ -945,28 +1107,35 @@ def call_gemini_json(
             )
 
             if (
-                is_model_unavailable_error(e)
-                or is_gemini_retryable_error(e)
+                is_model_unavailable_error(
+                    e
+                )
+                or is_gemini_retryable_error(
+                    e
+                )
             ):
 
                 print(
-                    "      Trying next Gemini model..."
+                    "      Trying next "
+                    "Gemini model..."
                 )
 
                 continue
 
             print(
-                "      Trying next model anyway..."
+                "      Trying next "
+                "model anyway..."
             )
 
     raise RuntimeError(
-        "All available Gemini models failed. "
+        "All available Gemini "
+        "models failed. "
         f"Last error: {last_error}"
     )
 
 
 # ==================================================================
-# TOPIC SELECTION
+# TOPIC SELECTOR
 # ==================================================================
 
 TOPIC_SELECTOR_PROMPT = """
@@ -980,7 +1149,6 @@ Prioritize:
 - simple premise
 - surprising detail
 - strong storytelling potential
-- strong visual potential for gameplay/background footage
 - factual reliability
 - a story that can be explained in 30–45 seconds
 
@@ -1001,15 +1169,15 @@ dangerous, mysterious, clever, or counterintuitive.
 For trivia:
 Prefer facts that create an immediate "wait, really?" reaction.
 
-Return ONLY JSON.
+Return ONLY valid JSON.
 
-{
+{{
   "selected_index": 0,
   "topic": "short topic description",
   "category": "on_this_day",
   "angle": "specific story angle",
   "source_summary": "brief factual basis"
-}
+}}
 
 CANDIDATES:
 
@@ -1024,27 +1192,30 @@ def select_topic(
     if not candidates:
 
         raise RuntimeError(
-            "No topic candidates available."
+            "No topic candidates "
+            "available."
         )
 
     compact = []
 
-    for i, item in enumerate(
+    for index, item in enumerate(
         candidates
     ):
 
         compact.append(
             {
-                "index": i,
+                "index": index,
                 **item,
             }
         )
 
-    prompt = TOPIC_SELECTOR_PROMPT.format(
-        candidates=json.dumps(
-            compact,
-            ensure_ascii=False,
-            indent=2,
+    prompt = (
+        TOPIC_SELECTOR_PROMPT.format(
+            candidates=json.dumps(
+                compact,
+                ensure_ascii=False,
+                indent=2,
+            )
         )
     )
 
@@ -1078,25 +1249,31 @@ def select_topic(
         candidates[index]
     )
 
-    selected["topic"] = result.get(
-        "topic",
-        selected.get(
-            "text",
+    selected["topic"] = (
+        result.get(
+            "topic",
             selected.get(
-                "question",
-                "interesting fact",
+                "text",
+                selected.get(
+                    "question",
+                    "interesting fact",
+                ),
             ),
-        ),
+        )
     )
 
-    selected["angle"] = result.get(
-        "angle",
-        "",
+    selected["angle"] = (
+        result.get(
+            "angle",
+            "",
+        )
     )
 
-    selected["source_summary"] = result.get(
-        "source_summary",
-        "",
+    selected["source_summary"] = (
+        result.get(
+            "source_summary",
+            "",
+        )
     )
 
     return selected
@@ -1124,9 +1301,14 @@ def get_dynamic_topic():
         k=1,
     )[0]
 
-    if source == "on_this_day":
+    if (
+        source
+        == "on_this_day"
+    ):
 
-        candidates = fetch_on_this_day()
+        candidates = (
+            fetch_on_this_day()
+        )
 
         if candidates:
 
@@ -1134,7 +1316,9 @@ def get_dynamic_topic():
                 candidates
             )
 
-        candidates = fetch_trivia()
+        candidates = (
+            fetch_trivia()
+        )
 
         if candidates:
 
@@ -1144,7 +1328,9 @@ def get_dynamic_topic():
 
     else:
 
-        candidates = fetch_trivia()
+        candidates = (
+            fetch_trivia()
+        )
 
         if candidates:
 
@@ -1152,7 +1338,9 @@ def get_dynamic_topic():
                 candidates
             )
 
-        candidates = fetch_on_this_day()
+        candidates = (
+            fetch_on_this_day()
+        )
 
         if candidates:
 
@@ -1175,29 +1363,35 @@ def get_dynamic_topic():
     return {
         "source": "fallback",
         "source_id": (
-            f"fallback-{fallback['topic']}"
+            "fallback-"
+            + fallback["topic"]
         ),
-        "topic": fallback["topic"],
-        "category": fallback["category"],
+        "topic": fallback[
+            "topic"
+        ],
+        "category": fallback[
+            "category"
+        ],
         "angle": "",
         "source_summary": "",
     }
 
 
 # ==================================================================
-# SCRIPT PROMPT
+# STORY GENERATION PROMPT
 # ==================================================================
 
 SCRIPT_PROMPT = """
-You are the lead writer for a viral-style educational YouTube Shorts
-channel.
+You are the lead writer for a high-retention YouTube Shorts channel.
 
 Write ONE continuous 30–45 second story.
 
-The video will use Minecraft, Roblox, building, parkour, or satisfying
-gameplay as the visual background.
+The video uses Minecraft, Roblox, building, parkour, or satisfying
+gameplay as the background.
 
-Therefore the narration itself must be extremely engaging.
+The gameplay is NOT related to the story.
+
+The narration must therefore carry the entertainment.
 
 TOPIC:
 {topic}
@@ -1217,11 +1411,12 @@ SOURCE MATERIAL:
 RECENT VIDEO TITLES:
 {recent_titles}
 
-STORY:
+STORY REQUIREMENTS:
 
 The first sentence must immediately create curiosity.
 
 Do NOT start with:
+
 - "Did you know?"
 - "Have you ever wondered?"
 - "Imagine this..."
@@ -1229,9 +1424,9 @@ Do NOT start with:
 - "You won't believe..."
 - "Prepare to have your mind blown."
 
-Instead, start with a concrete surprising statement.
+Instead, begin with a concrete surprising statement.
 
-Example style:
+Example:
 
 "People once spent days dancing in the streets of a European city."
 
@@ -1240,10 +1435,10 @@ Then explain why.
 STRUCTURE:
 
 1. HOOK
-   1 strong sentence.
+   One strong sentence.
 
 2. CONTEXT
-   Explain what is happening.
+   Explain what happened.
 
 3. ESCALATION
    Introduce the strangest or most surprising detail.
@@ -1265,8 +1460,6 @@ STYLE:
 - short sentences
 - occasional longer sentence for rhythm
 - contractions are encouraged
-- no unnecessary dates
-- no unnecessary names
 - no filler
 - no fake quotes
 - no fake dialogue
@@ -1276,12 +1469,13 @@ STYLE:
 - no political persuasion
 - no repetitive phrases
 
-The narration should normally be 85–115 words.
+Target 85–115 spoken words.
 
 IMPORTANT:
-The gameplay is unrelated to the story.
 
-Do NOT describe the gameplay in the narration.
+Do NOT describe the gameplay.
+
+Do NOT pretend the gameplay is connected to the story.
 
 CAPTIONS:
 
@@ -1293,7 +1487,7 @@ Each chunk should normally be 2–5 words.
 
 Maximum 6 words.
 
-Captions must be written in uppercase.
+Captions MUST be uppercase.
 
 Examples:
 
@@ -1306,16 +1500,11 @@ or:
 "FOR DAYS"
 "AND NOBODY KNEW WHY"
 
-VISUALS:
+GAMEPLAY:
 
-We are NOT using stock footage for the story.
+The program automatically chooses the gameplay.
 
-The background will be gameplay.
-
-Therefore visual_query should describe the desired gameplay mood,
-not the historical event.
-
-Choose one:
+Choose the general gameplay style that would work best:
 
 "building"
 "parkour"
@@ -1370,14 +1559,16 @@ def generate_script(
         indent=2,
     )
 
-    recent_text = (
-        "\n".join(
+    if recent_titles:
+
+        recent_text = "\n".join(
             f"- {title}"
             for title in recent_titles
         )
-        if recent_titles
-        else "None"
-    )
+
+    else:
+
+        recent_text = "None"
 
     prompt = SCRIPT_PROMPT.format(
         topic=topic_data.get(
@@ -1426,7 +1617,8 @@ def validate_script(
     ):
 
         raise RuntimeError(
-            "Gemini script is not an object."
+            "Gemini script is "
+            "not an object."
         )
 
     title = data.get(
@@ -1451,16 +1643,29 @@ def validate_script(
             "Empty title."
         )
 
-    data["title"] = title[:100]
+    # YouTube title target:
+    # under 60 characters.
+    if len(title) > 60:
+
+        title = (
+            title[:57]
+            .rstrip()
+            + "..."
+        )
+
+    data["title"] = title
 
     scenes = data.get(
         "scenes"
     )
 
-    if not isinstance(
-        scenes,
-        list,
-    ) or not scenes:
+    if (
+        not isinstance(
+            scenes,
+            list,
+        )
+        or not scenes
+    ):
 
         raise RuntimeError(
             "No scenes returned."
@@ -1488,10 +1693,13 @@ def validate_script(
             "",
         )
 
-        if not isinstance(
-            narration,
-            str,
-        ) or not narration.strip():
+        if (
+            not isinstance(
+                narration,
+                str,
+            )
+            or not narration.strip()
+        ):
 
             raise RuntimeError(
                 "Scene has no narration."
@@ -1505,10 +1713,13 @@ def validate_script(
             "caption_chunks"
         )
 
-        if not isinstance(
-            chunks,
-            list,
-        ) or not chunks:
+        if (
+            not isinstance(
+                chunks,
+                list,
+            )
+            or not chunks
+        ):
 
             words = narration.split()
 
@@ -1525,7 +1736,7 @@ def validate_script(
                         words[
                             start:start + 4
                         ]
-                    ).upper()
+                    )
                 )
 
         cleaned = []
@@ -1537,6 +1748,7 @@ def validate_script(
             ).strip()
 
             if not chunk:
+
                 continue
 
             chunk = re.sub(
@@ -1571,7 +1783,10 @@ def validate_script(
         "adventure",
     ]
 
-    if gameplay_style not in allowed_styles:
+    if (
+        gameplay_style
+        not in allowed_styles
+    ):
 
         gameplay_style = "building"
 
@@ -1604,14 +1819,21 @@ def validate_script(
         for x in hashtags[:6]
     ]
 
-    if data.get(
-        "ending_style"
-    ) not in (
+    ending_style = data.get(
+        "ending_style",
+        "loop",
+    )
+
+    if ending_style not in (
         "loop",
         "joke",
     ):
 
-        data["ending_style"] = "loop"
+        ending_style = "loop"
+
+    data[
+        "ending_style"
+    ] = ending_style
 
 
 # ==================================================================
@@ -1626,9 +1848,11 @@ async def _synthesize(
 
     import edge_tts
 
-    communicate = edge_tts.Communicate(
-        text,
-        voice,
+    communicate = (
+        edge_tts.Communicate(
+            text,
+            voice,
+        )
     )
 
     await communicate.save(
@@ -1641,7 +1865,9 @@ def synthesize_scene_audio(
     run_dir,
 ):
 
-    from moviepy import AudioFileClip
+    from moviepy import (
+        AudioFileClip,
+    )
 
     voice = random.choice(
         TTS_VOICES
@@ -1685,6 +1911,11 @@ def synthesize_scene_audio(
             }
         )
 
+        print(
+            f"      Scene {i + 1}: "
+            f"{duration:.2f}s"
+        )
+
     return results
 
 
@@ -1712,11 +1943,14 @@ def get_gameplay_files():
     ):
 
         if not path.is_file():
+
             continue
 
-        if path.suffix.lower() not in (
-            allowed_extensions
+        if (
+            path.suffix.lower()
+            not in allowed_extensions
         ):
+
             continue
 
         files.append(
@@ -1738,22 +1972,28 @@ def detect_gameplay_style(
     filename = path.stem.lower()
 
     combined = " ".join(
-        parts + [filename]
+        parts
+        + [filename]
     )
 
     if "roblox" in combined:
+
         return "roblox"
 
     if "minecraft" in combined:
+
         return "minecraft"
 
     if "parkour" in combined:
+
         return "parkour"
 
     if "build" in combined:
+
         return "building"
 
     if "satisfying" in combined:
+
         return "satisfying"
 
     return "general"
@@ -1768,29 +2008,53 @@ def select_gameplay(
     if not files:
 
         raise RuntimeError(
-            "\nNo gameplay videos found.\n\n"
-            "Create a gameplay/ folder and add "
-            "your .mp4/.mov/.webm files.\n\n"
+            "\nNo gameplay videos "
+            "were found.\n\n"
+            "Create a gameplay/ "
+            "folder and add your "
+            "videos.\n\n"
             "Example:\n"
-            "gameplay/minecraft/build01.mp4\n"
-            "gameplay/roblox/build01.mp4\n"
+            "gameplay/minecraft/"
+            "build01.mp4\n"
+            "gameplay/roblox/"
+            "build01.mp4\n"
         )
 
+    # Try to match the style.
     if style:
 
         style_matches = []
 
         for path in files:
 
-            detected = detect_gameplay_style(
-                path
+            detected = (
+                detect_gameplay_style(
+                    path
+                )
             )
 
+            # Minecraft and Roblox
+            # are both treated as
+            # building/general footage.
             if (
                 style.lower()
                 in detected.lower()
                 or detected.lower()
                 in style.lower()
+            ):
+
+                style_matches.append(
+                    path
+                )
+
+            elif (
+                style == "building"
+                and detected
+                in (
+                    "minecraft",
+                    "roblox",
+                    "building",
+                )
             ):
 
                 style_matches.append(
@@ -1806,7 +2070,8 @@ def select_gameplay(
     )
 
     print(
-        f"      Gameplay: {selected}"
+        f"      Gameplay: "
+        f"{selected}"
     )
 
     return selected
@@ -1822,9 +2087,7 @@ def build_caption_timing(
     duration,
 ):
 
-    words = narration.split()
-
-    if not words:
+    if not narration.strip():
 
         return []
 
@@ -1832,43 +2095,40 @@ def build_caption_timing(
 
     for chunk in caption_chunks:
 
-        chunk_words = chunk.split()
+        chunk = str(
+            chunk
+        ).strip()
 
-        if chunk_words:
+        if not chunk:
 
-            chunks.append(
-                {
-                    "text": chunk,
-                    "words": len(
-                        chunk_words
-                    ),
-                }
-            )
+            continue
+
+        words = chunk.split()
+
+        chunks.append(
+            {
+                "text": chunk.upper(),
+                "words": max(
+                    1,
+                    len(words),
+                ),
+            }
+        )
 
     if not chunks:
 
         return [
             {
                 "text": narration.upper(),
-                "start": 0,
+                "start": 0.0,
                 "end": duration,
             }
         ]
 
     total_words = sum(
-        x["words"]
-        for x in chunks
+        item["words"]
+        for item in chunks
     )
-
-    if total_words <= 0:
-
-        return [
-            {
-                "text": narration.upper(),
-                "start": 0,
-                "end": duration,
-            }
-        ]
 
     result = []
 
@@ -1878,7 +2138,10 @@ def build_caption_timing(
         chunks
     ):
 
-        if index == len(chunks) - 1:
+        if (
+            index
+            == len(chunks) - 1
+        ):
 
             end = duration
 
@@ -1936,20 +2199,29 @@ def add_background_music(
 
         return final_clip
 
-    path = random.choice(
+    music_path = random.choice(
         files
     )
 
-    bgm = AudioFileClip(
-        str(path)
+    print(
+        f"      BGM: {music_path}"
     )
 
-    if bgm.duration < final_clip.duration:
+    bgm = AudioFileClip(
+        str(music_path)
+    )
+
+    if (
+        bgm.duration
+        < final_clip.duration
+    ):
 
         bgm = bgm.with_effects(
             [
                 afx.AudioLoop(
-                    duration=final_clip.duration
+                    duration=(
+                        final_clip.duration
+                    )
                 )
             ]
         )
@@ -1999,15 +2271,41 @@ def prepare_gameplay_clip(
         vfx,
     )
 
+    print(
+        "      Loading gameplay..."
+    )
+
     clip = VideoFileClip(
         str(gameplay_path)
     ).without_audio()
+
+    if not clip.duration:
+
+        clip.close()
+
+        raise RuntimeError(
+            "Gameplay video has "
+            "no usable duration."
+        )
 
     # --------------------------------------------------------------
     # LOOP IF TOO SHORT
     # --------------------------------------------------------------
 
-    if clip.duration < duration:
+    if (
+        clip.duration
+        < duration
+    ):
+
+        print(
+            "      Gameplay is shorter "
+            "than the Short."
+        )
+
+        print(
+            "      Looping gameplay "
+            "to fill duration."
+        )
 
         clip = clip.with_effects(
             [
@@ -2021,15 +2319,15 @@ def prepare_gameplay_clip(
 
         max_start = max(
             0,
-            clip.duration - duration
+            clip.duration
+            - duration,
         )
 
-        # Random section makes repeated gameplay less obvious.
         if max_start > 1:
 
             start = random.uniform(
                 0,
-                max_start
+                max_start,
             )
 
         else:
@@ -2055,9 +2353,11 @@ def prepare_gameplay_clip(
         / VIDEO_H
     )
 
-    if source_ratio > target_ratio:
+    if (
+        source_ratio
+        > target_ratio
+    ):
 
-        # Too wide.
         new_width = (
             clip.h
             * target_ratio
@@ -2066,15 +2366,19 @@ def prepare_gameplay_clip(
         clip = clip.with_effects(
             [
                 vfx.Crop(
-                    x_center=clip.w / 2,
+                    x_center=(
+                        clip.w / 2
+                    ),
                     width=new_width,
                 )
             ]
         )
 
-    elif source_ratio < target_ratio:
+    elif (
+        source_ratio
+        < target_ratio
+    ):
 
-        # Too tall.
         new_height = (
             clip.w
             / target_ratio
@@ -2083,7 +2387,9 @@ def prepare_gameplay_clip(
         clip = clip.with_effects(
             [
                 vfx.Crop(
-                    y_center=clip.h / 2,
+                    y_center=(
+                        clip.h / 2
+                    ),
                     height=new_height,
                 )
             ]
@@ -2101,12 +2407,15 @@ def prepare_gameplay_clip(
         ]
     )
 
+    # Final width adjustment.
     if clip.w > VIDEO_W:
 
         clip = clip.with_effects(
             [
                 vfx.Crop(
-                    x_center=clip.w / 2,
+                    x_center=(
+                        clip.w / 2
+                    ),
                     width=VIDEO_W,
                 )
             ]
@@ -2207,6 +2516,7 @@ def build_video(
     from moviepy import (
         AudioFileClip,
         CompositeVideoClip,
+        CompositeAudioClip,
     )
 
     if not Path(
@@ -2214,14 +2524,12 @@ def build_video(
     ).exists():
 
         raise FileNotFoundError(
-            "Missing caption font:\n"
-            f"{CAPTION_FONT_PATH}\n\n"
-            "Commit Anton-Regular.ttf to the "
-            "repository root."
+            "Missing caption font: "
+            f"{CAPTION_FONT_PATH}"
         )
 
     # --------------------------------------------------------------
-    # TOTAL AUDIO DURATION
+    # TOTAL DURATION
     # --------------------------------------------------------------
 
     total_duration = sum(
@@ -2230,17 +2538,33 @@ def build_video(
     )
 
     print(
-        f"      Total video duration: "
+        f"      Total duration: "
         f"{total_duration:.2f}s"
     )
+
+    if total_duration < 20:
+
+        print(
+            "WARNING: Generated "
+            "narration is unusually short."
+        )
+
+    if total_duration > 55:
+
+        print(
+            "WARNING: Generated "
+            "narration is unusually long."
+        )
 
     # --------------------------------------------------------------
     # GAMEPLAY
     # --------------------------------------------------------------
 
-    gameplay = prepare_gameplay_clip(
-        gameplay_path,
-        total_duration,
+    gameplay = (
+        prepare_gameplay_clip(
+            gameplay_path,
+            total_duration,
+        )
     )
 
     # --------------------------------------------------------------
@@ -2251,38 +2575,60 @@ def build_video(
 
     current_time = 0.0
 
-    for i, scene in enumerate(
+    for index, scene in enumerate(
         script["scenes"]
     ):
 
-        duration = audio_clips[
-            i
-        ]["duration"]
+        if index >= len(
+            audio_clips
+        ):
 
-        timing = build_caption_timing(
-            scene["narration"],
-            scene["caption_chunks"],
-            duration,
+            break
+
+        scene_duration = (
+            audio_clips[
+                index
+            ]["duration"]
+        )
+
+        timing = (
+            build_caption_timing(
+                scene[
+                    "narration"
+                ],
+                scene[
+                    "caption_chunks"
+                ],
+                scene_duration,
+            )
         )
 
         for caption in timing:
 
-            txt = create_caption_clip(
-                caption["text"],
-                current_time
-                + caption["start"],
+            caption_duration = (
                 caption["end"]
-                - caption["start"],
+                - caption["start"]
+            )
+
+            txt = (
+                create_caption_clip(
+                    caption["text"],
+                    current_time
+                    + caption["start"],
+                    caption_duration,
+                )
             )
 
             caption_layers.append(
                 txt
             )
 
-        current_time += duration
+        current_time += (
+            scene_duration
+        )
 
     # --------------------------------------------------------------
-    # AUDIO
+    # NARRATION AUDIO
     # --------------------------------------------------------------
 
     audio_layers = []
@@ -2295,28 +2641,26 @@ def build_video(
             str(item["path"])
         )
 
-        if current_time > 0:
-
-            audio = audio.with_start(
-                current_time
-            )
+        audio = audio.with_start(
+            current_time
+        )
 
         audio_layers.append(
             audio
         )
 
-        current_time += item[
-            "duration"
-        ]
+        current_time += (
+            item["duration"]
+        )
 
-    from moviepy import CompositeAudioClip
-
-    narration_audio = CompositeAudioClip(
-        audio_layers
+    narration_audio = (
+        CompositeAudioClip(
+            audio_layers
+        )
     )
 
     # --------------------------------------------------------------
-    # COMPOSITE
+    # VIDEO COMPOSITE
     # --------------------------------------------------------------
 
     final = CompositeVideoClip(
@@ -2335,7 +2679,7 @@ def build_video(
     )
 
     # --------------------------------------------------------------
-    # MUSIC
+    # BACKGROUND MUSIC
     # --------------------------------------------------------------
 
     final = add_background_music(
@@ -2343,12 +2687,16 @@ def build_video(
     )
 
     # --------------------------------------------------------------
-    # WRITE
+    # OUTPUT
     # --------------------------------------------------------------
 
     out_path = (
         run_dir
         / "final_video.mp4"
+    )
+
+    print(
+        "\n      Rendering video..."
     )
 
     final.write_videofile(
@@ -2360,29 +2708,31 @@ def build_video(
         preset="medium",
     )
 
-    try:
+    # --------------------------------------------------------------
+    # CLEANUP
+    # --------------------------------------------------------------
 
+    try:
         gameplay.close()
-
     except Exception:
-
         pass
 
     try:
-
         narration_audio.close()
-
     except Exception:
-
         pass
 
     try:
-
         final.close()
-
     except Exception:
-
         pass
+
+    for audio in audio_layers:
+
+        try:
+            audio.close()
+        except Exception:
+            pass
 
     return out_path
 
@@ -2400,7 +2750,7 @@ def run_pipeline():
     )
 
     print(
-        "SPACE FACTS PIPELINE v6"
+        "SPACE FACTS PIPELINE v7"
     )
 
     print(
@@ -2419,7 +2769,9 @@ def run_pipeline():
         "\nFetching a fresh topic..."
     )
 
-    topic_data = get_dynamic_topic()
+    topic_data = (
+        get_dynamic_topic()
+    )
 
     topic = topic_data.get(
         "topic",
@@ -2445,8 +2797,13 @@ def run_pipeline():
     )
 
     print(
-        f"Source: "
-        f"{topic_data.get('source', 'unknown')}"
+        "Source: "
+        + str(
+            topic_data.get(
+                "source",
+                "unknown",
+            )
+        )
     )
 
     # --------------------------------------------------------------
@@ -2457,41 +2814,18 @@ def run_pipeline():
         "\n[1/5] Generating story..."
     )
 
-    recent_titles = get_recent_titles()
+    recent_titles = (
+        get_recent_titles()
+    )
 
-    try:
-
-        script = generate_script(
-            topic_data,
-            recent_titles,
-        )
-
-    except Exception as e:
-
-        print(
-            "\n=================================================="
-        )
-
-        print(
-            "SCRIPT GENERATION FAILED"
-        )
-
-        print(
-            "=================================================="
-        )
-
-        print(
-            str(e)
-        )
-
-        print(
-            "\nThe source topic was NOT marked as used."
-        )
-
-        raise
+    script = generate_script(
+        topic_data,
+        recent_titles,
+    )
 
     print(
-        f"\n      Title: {script['title']}"
+        f"\n      Title: "
+        f"{script['title']}"
     )
 
     print(
@@ -2500,26 +2834,10 @@ def run_pipeline():
     )
 
     print(
-        f"      Gameplay style: "
-        f"{script['gameplay_style']}"
-    )
-
-    # --------------------------------------------------------------
-    # Mark source used after successful script.
-    # --------------------------------------------------------------
-
-    if source_id:
-
-        remember_source(
-            source_id
-        )
-
-    remember_topic(
-        topic
-    )
-
-    record_used_title(
-        script["title"]
+        "      Gameplay style: "
+        + script[
+            "gameplay_style"
+        ]
     )
 
     # --------------------------------------------------------------
@@ -2527,13 +2845,15 @@ def run_pipeline():
     # --------------------------------------------------------------
 
     print(
-        "\nSelecting gameplay..."
+        "\n[2/5] Selecting gameplay..."
     )
 
-    gameplay_path = select_gameplay(
-        script.get(
-            "gameplay_style",
-            "building",
+    gameplay_path = (
+        select_gameplay(
+            script.get(
+                "gameplay_style",
+                "building",
+            )
         )
     )
 
@@ -2542,29 +2862,61 @@ def run_pipeline():
     # --------------------------------------------------------------
 
     safe_title = "".join(
-        c
-        for c in script["title"]
-        if c.isalnum()
-        or c in (
-            " ",
-            "_",
-            "-",
+        character
+        for character in script[
+            "title"
+        ]
+        if (
+            character.isalnum()
+            or character in (
+                " ",
+                "_",
+                "-",
+            )
         )
     )
 
-    run_dir = (
-        OUTPUT_DIR
-        / safe_title.replace(
+    safe_title = (
+        safe_title.strip()
+        .replace(
             " ",
             "_",
-        )[:50]
+        )
     )
+
+    if not safe_title:
+
+        safe_title = "short"
+
+    run_dir = (
+        OUTPUT_DIR
+        / safe_title[:50]
+    )
+
+    # Prevent accidental collision.
+    if run_dir.exists():
+
+        run_dir = (
+            OUTPUT_DIR
+            / (
+                safe_title[:40]
+                + "_"
+                + datetime.now(
+                    ZoneInfo(
+                        "Africa/Harare"
+                    )
+                ).strftime(
+                    "%Y%m%d_%H%M%S"
+                )
+            )
+        )
 
     run_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
+    # Save metadata.
     (
         run_dir
         / "script.json"
@@ -2588,7 +2940,7 @@ def run_pipeline():
     # --------------------------------------------------------------
 
     print(
-        "\n[2/5] Synthesizing narration..."
+        "\n[3/5] Synthesizing narration..."
     )
 
     audio_clips = (
@@ -2603,7 +2955,7 @@ def run_pipeline():
     # --------------------------------------------------------------
 
     print(
-        "\n[3/5] Building gameplay Short..."
+        "\n[4/5] Building gameplay Short..."
     )
 
     final_path = build_video(
@@ -2618,7 +2970,16 @@ def run_pipeline():
     # --------------------------------------------------------------
 
     print(
-        "\n[4/5] Uploading to YouTube..."
+        "\n[5/5] Uploading to YouTube..."
+    )
+
+    hashtags = script.get(
+        "hashtags",
+        [
+            "#shorts",
+            "#facts",
+            "#history",
+        ],
     )
 
     description = (
@@ -2628,7 +2989,7 @@ def run_pipeline():
         )
         + "\n\n"
         + " ".join(
-            script["hashtags"]
+            hashtags
         )
     )
 
@@ -2637,26 +2998,43 @@ def run_pipeline():
             file_path=str(
                 final_path
             ),
-            title=script["title"],
+            title=script[
+                "title"
+            ],
             description=description,
             tags=[
-                h.replace(
+                hashtag.replace(
                     "#",
                     "",
                 )
-                for h in script["hashtags"]
+                for hashtag
+                in hashtags
             ],
             privacy_status="public",
         )
     )
 
-    video_id = upload_result[
-        "id"
-    ]
+    video_id = (
+        upload_result["id"]
+    )
 
     # --------------------------------------------------------------
-    # LOG
+    # ONLY MARK TOPIC USED AFTER SUCCESSFUL UPLOAD
     # --------------------------------------------------------------
+
+    if source_id:
+
+        remember_source(
+            source_id
+        )
+
+    remember_topic(
+        topic
+    )
+
+    record_used_title(
+        script["title"]
+    )
 
     log_upload(
         video_id,
@@ -2666,10 +3044,6 @@ def run_pipeline():
             "ending_style",
             "loop",
         ),
-    )
-
-    print(
-        "\n[5/5] Complete."
     )
 
     print(
@@ -2693,7 +3067,8 @@ def run_pipeline():
     )
 
     print(
-        f"YouTube: https://youtu.be/{video_id}"
+        f"YouTube: "
+        f"https://youtu.be/{video_id}"
     )
 
     return final_path
