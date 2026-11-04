@@ -18,8 +18,20 @@ ROOT = Path(__file__).resolve().parent
 LOG_PATH = ROOT / "topics.json"
 OUT_PATH = ROOT / "script.json"
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+# Tried in order. A 404 means the key cannot use that model, so the next one is tried.
+# Set a GEMINI_MODEL variable in the workflow to force one model first.
+MODELS = [
+    m for m in [
+        os.getenv("GEMINI_MODEL"),
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-flash",
+    ] if m
+]
+_working_model = None
 
 # Categories that performed best. Rotated so no category repeats back to back.
 CATEGORIES = [
@@ -73,7 +85,7 @@ Return JSON with exactly these keys:
 "search_terms": a list of 4 short stock footage search phrases that match the script."""
 
 
-def call_gemini(prompt: str) -> tuple:
+def _request(prompt: str, model: str) -> tuple:
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("GEMINI_API_KEY is not set")
@@ -82,26 +94,48 @@ def call_gemini(prompt: str) -> tuple:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 1.0,
-            "maxOutputTokens": 2048,
+            # Generous limit so hidden thinking tokens cannot cut the script off.
+            # A cut-off is still caught by the finishReason check below.
+            "maxOutputTokens": 8192,
             "responseMimeType": "application/json",
-            # Thinking tokens count against maxOutputTokens and are a common
-            # cause of cut-off output, so thinking is switched off here.
-            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
     resp = requests.post(
-        API_URL,
+        API_URL.format(model=model),
         headers={"x-goog-api-key": key, "Content-Type": "application/json"},
         json=body,
         timeout=90,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        print(f"Gemini error {resp.status_code} for {model}: {resp.text[:500]}")
+        resp.raise_for_status()
     data = resp.json()
 
     candidate = data["candidates"][0]
     finish = candidate.get("finishReason", "")
     text = "".join(p.get("text", "") for p in candidate["content"]["parts"])
     return text, finish
+
+
+def call_gemini(prompt: str) -> tuple:
+    global _working_model
+    models = [_working_model] if _working_model else MODELS
+
+    for model in models:
+        try:
+            result = _request(prompt, model)
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status == 404:
+                print(f"Model {model} is not available to this key, trying the next one")
+                continue
+            raise
+        if _working_model != model:
+            print(f"Using model: {model}")
+        _working_model = model
+        return result
+
+    raise RuntimeError("None of the models were available to this API key: " + ", ".join(models))
 
 
 def validate(item: dict, finish: str, used_topics: set) -> list:
