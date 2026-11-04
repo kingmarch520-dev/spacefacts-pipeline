@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -117,25 +118,46 @@ def _request(prompt: str, model: str) -> tuple:
     return text, finish
 
 
+RETRY_STATUS = {500, 502, 503, 504}   # Google is busy: wait and retry the same model
+SKIP_STATUS = {404, 429}              # not available or out of quota: go to the next model
+RETRY_WAITS = [5, 15, 30]             # seconds to wait before each retry
+
+
 def call_gemini(prompt: str) -> tuple:
     global _working_model
-    models = [_working_model] if _working_model else MODELS
+    models = list(MODELS)
+    if _working_model:
+        models = [_working_model] + [m for m in models if m != _working_model]
 
+    last_error = None
     for model in models:
-        try:
-            result = _request(prompt, model)
-        except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status == 404:
-                print(f"Model {model} is not available to this key, trying the next one")
+        for wait in [0] + RETRY_WAITS:
+            if wait:
+                print(f"Model {model} is busy, retrying in {wait}s")
+                time.sleep(wait)
+            try:
+                result = _request(prompt, model)
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                last_error = exc
+                if status in RETRY_STATUS:
+                    continue
+                if status in SKIP_STATUS:
+                    print(f"Model {model} not usable right now (HTTP {status}), trying the next one")
+                    break
+                raise
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_error = exc
                 continue
-            raise
-        if _working_model != model:
-            print(f"Using model: {model}")
-        _working_model = model
-        return result
 
-    raise RuntimeError("None of the models were available to this API key: " + ", ".join(models))
+            if _working_model != model:
+                print(f"Using model: {model}")
+            _working_model = model
+            return result
+
+        print(f"Giving up on {model}")
+
+    raise RuntimeError(f"No Gemini model worked. Last error: {last_error}")
 
 
 def validate(item: dict, finish: str, used_topics: set) -> list:
