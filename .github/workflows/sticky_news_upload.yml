@@ -1,0 +1,54 @@
+name: Upload Sticky News Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_path:
+        description: Path to the finished video in this repo
+        required: true
+        default: videos/video1_frog_bones.mp4
+        type: string
+      metadata_path:
+        description: Path to the metadata JSON Claude gave you for this video
+        required: true
+        default: videos/video1_frog_bones.json
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install google-api-python-client google-auth
+
+      - name: Upload to YouTube
+        run: |
+          python upload_sticky_news.py "${{ inputs.video_path }}" "${{ inputs.metadata_path }}"
+
+      - name: Save upload log
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add upload_log.jsonl || true
+          git commit -m "Log Sticky News upload" || true
+          git push || true
